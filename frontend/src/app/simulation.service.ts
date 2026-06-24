@@ -1,96 +1,27 @@
-import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
-import { ControlCommand, WorldSnapshot } from './models';
+import { Signal } from '@angular/core';
+import { WorldSnapshot } from './models';
 
 /**
- * Connects to the Rust simulation server: streams the latest
- * {@link WorldSnapshot} over a WebSocket and sends control commands over REST.
+ * Abstract contract for a simulation source. Components depend on this; the
+ * concrete implementation is chosen at build time (see `app.config.ts`):
  *
- * The WebSocket and REST URLs are derived from the page origin, so the same
- * build works both behind the Angular dev-server proxy and when served as
- * static files directly by the Rust server.
+ * - {@link WebSocketSimulationService} streams from the Rust server (local dev).
+ * - {@link WasmSimulationService} runs the engine in-browser via WebAssembly
+ *   (the static GitHub Pages build, where there is no backend).
+ *
+ * Doubles as the DI token, so `inject(SimulationService)` resolves to whichever
+ * implementation was provided.
  */
-@Injectable({ providedIn: 'root' })
-export class SimulationService {
-  private readonly zone = inject(NgZone);
-
-  /** The most recent snapshot received, or `null` before the first frame. */
-  readonly snapshot = signal<WorldSnapshot | null>(null);
-  /** Whether the WebSocket is currently open. */
-  readonly connected = signal(false);
-
-  private socket?: WebSocket;
-  private reconnectTimer?: ReturnType<typeof setTimeout>;
-  private closed = false;
-
-  constructor() {
-    this.connect();
-    inject(DestroyRef).onDestroy(() => this.disconnect());
-  }
+export abstract class SimulationService {
+  /** The most recent snapshot, or `null` before the first frame. */
+  abstract readonly snapshot: Signal<WorldSnapshot | null>;
+  /** Whether the source is live (socket open / wasm engine loaded). */
+  abstract readonly connected: Signal<boolean>;
 
   /** Resume stepping the simulation. */
-  start(): Promise<void> {
-    return this.control('start');
-  }
-
+  abstract start(): void;
   /** Pause the simulation in place. */
-  pause(): Promise<void> {
-    return this.control('pause');
-  }
-
+  abstract pause(): void;
   /** Reset to a fresh seeded world. */
-  reset(): Promise<void> {
-    return this.control('reset');
-  }
-
-  private async control(command: ControlCommand): Promise<void> {
-    await fetch('/api/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ command }),
-    });
-  }
-
-  private connect(): void {
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${window.location.host}/ws`;
-    const socket = new WebSocket(url);
-    this.socket = socket;
-
-    socket.onopen = () => this.zone.run(() => this.connected.set(true));
-
-    socket.onmessage = (event) => {
-      let parsed: WorldSnapshot;
-      try {
-        parsed = JSON.parse(event.data as string);
-      } catch {
-        return;
-      }
-      // Snapshots arrive ~30x/sec; run inside the zone so the signal update
-      // drives change detection.
-      this.zone.run(() => this.snapshot.set(parsed));
-    };
-
-    socket.onclose = () => {
-      this.zone.run(() => this.connected.set(false));
-      this.scheduleReconnect();
-    };
-
-    socket.onerror = () => socket.close();
-  }
-
-  private scheduleReconnect(): void {
-    if (this.closed || this.reconnectTimer) {
-      return;
-    }
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.connect();
-    }, 1000);
-  }
-
-  private disconnect(): void {
-    this.closed = true;
-    clearTimeout(this.reconnectTimer);
-    this.socket?.close();
-  }
+  abstract reset(): void;
 }

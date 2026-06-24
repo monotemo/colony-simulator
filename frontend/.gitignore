@@ -6,6 +6,9 @@
 /out-tsc
 /bazel-out
 
+# Generated wasm-pack output (built from backend/colony-wasm)
+/public/wasm
+
 # Node
 /node_modules
 npm-debug.log

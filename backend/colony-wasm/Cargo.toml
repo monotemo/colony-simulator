@@ -1,0 +1,20 @@
+[package]
+name = "colony-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings exposing the colony simulation to the browser."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+colony-core = { path = "../colony-core" }
+serde_json = { workspace = true }
+wasm-bindgen = "0.2"
+
+# wasm-opt downloads a binaryen release at build time, which isn't always
+# reachable (proxied CI environments). Disable it for reproducible builds; the
+# only cost is a slightly larger .wasm.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

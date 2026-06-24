@@ -5,6 +5,8 @@
     "ng": "ng",
     "start": "ng serve",
     "build": "ng build",
+    "build:wasm": "wasm-pack build ../backend/colony-wasm --target web --release --out-dir \"$(pwd)/public/wasm\"",
+    "build:pages": "npm run build:wasm && ng build --base-href /colony-simulator/",
     "watch": "ng build --watch --configuration development",
     "test": "ng test"
   },
