@@ -4,20 +4,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::bee::Bee;
 use crate::entity::{EntityId, IdAllocator};
-use crate::math::Vec2;
+use crate::math::Vec3;
 
-/// The rectangular extent of the world, in world units. The origin is the
-/// top-left corner; valid positions satisfy `0 <= x <= width` and
-/// `0 <= y <= height`.
+/// The box-shaped extent of the world, in world units. The origin is the
+/// top-left-front corner; valid positions satisfy `0 <= x <= width`,
+/// `0 <= y <= height`, and `0 <= z <= depth`.
+///
+/// `depth` is the third (vertical/flight) axis. Until flight behavior lands the
+/// world is seeded flat at `z = 0`, but bounds carry real depth so the
+/// integration loop confines bees in 3D from the start.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub width: f64,
     pub height: f64,
+    pub depth: f64,
 }
 
 impl Bounds {
-    pub const fn new(width: f64, height: f64) -> Self {
-        Self { width, height }
+    pub const fn new(width: f64, height: f64, depth: f64) -> Self {
+        Self {
+            width,
+            height,
+            depth,
+        }
     }
 }
 
@@ -33,7 +42,7 @@ pub enum ResourceKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resource {
     pub id: EntityId,
-    pub position: Vec2,
+    pub position: Vec3,
     pub kind: ResourceKind,
 }
 
@@ -58,14 +67,14 @@ impl World {
     }
 
     /// Spawn a bee at `position` with `velocity`, allocating it a fresh id.
-    pub fn spawn_bee(&mut self, position: Vec2, velocity: Vec2) -> EntityId {
+    pub fn spawn_bee(&mut self, position: Vec3, velocity: Vec3) -> EntityId {
         let id = self.ids.alloc();
         self.bees.push(Bee::new(id, position, velocity));
         id
     }
 
     /// Add a resource node at `position`, allocating it a fresh id.
-    pub fn add_resource(&mut self, position: Vec2, kind: ResourceKind) -> EntityId {
+    pub fn add_resource(&mut self, position: Vec3, kind: ResourceKind) -> EntityId {
         let id = self.ids.alloc();
         self.resources.push(Resource {
             id,
@@ -79,27 +88,31 @@ impl World {
     /// varied velocities plus a few nectar sources. Deterministic so the
     /// initial state is reproducible without pulling in an RNG dependency.
     pub fn seeded() -> Self {
-        let bounds = Bounds::new(800.0, 600.0);
+        // Depth is sized for the eventual flight volume; bees and resources are
+        // seeded flat at z = 0 until flight behavior lands, so visuals are
+        // unchanged while the third axis exists for real in the geometry.
+        let bounds = Bounds::new(800.0, 600.0, 400.0);
         let mut world = World::empty(bounds);
 
         let bee_count = 24;
         for i in 0..bee_count {
             let t = i as f64 / bee_count as f64;
-            // Spread starting positions across the interior.
-            let position = Vec2::new(
+            // Spread starting positions across the interior, on the z = 0 plane.
+            let position = Vec3::new(
                 bounds.width * (0.2 + 0.6 * fract(t * 7.0)),
                 bounds.height * (0.2 + 0.6 * fract(t * 3.0)),
+                0.0,
             );
-            // Varied directions at a steady speed.
+            // Varied directions at a steady speed, in the z = 0 plane for now.
             let angle = t * std::f64::consts::TAU * 3.0;
             let speed = 60.0;
-            let velocity = Vec2::new(angle.cos() * speed, angle.sin() * speed);
+            let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
             world.spawn_bee(position, velocity);
         }
 
         for (fx, fy) in [(0.25, 0.3), (0.7, 0.25), (0.5, 0.75), (0.8, 0.7)] {
             world.add_resource(
-                Vec2::new(bounds.width * fx, bounds.height * fy),
+                Vec3::new(bounds.width * fx, bounds.height * fy, 0.0),
                 ResourceKind::Nectar,
             );
         }
@@ -126,10 +139,10 @@ mod tests {
 
     #[test]
     fn spawn_assigns_unique_ids() {
-        let mut world = World::empty(Bounds::new(100.0, 100.0));
-        let a = world.spawn_bee(Vec2::ZERO, Vec2::ZERO);
-        let b = world.spawn_bee(Vec2::ZERO, Vec2::ZERO);
-        let r = world.add_resource(Vec2::ZERO, ResourceKind::Nectar);
+        let mut world = World::empty(Bounds::new(100.0, 100.0, 100.0));
+        let a = world.spawn_bee(Vec3::ZERO, Vec3::ZERO);
+        let b = world.spawn_bee(Vec3::ZERO, Vec3::ZERO);
+        let r = world.add_resource(Vec3::ZERO, ResourceKind::Nectar);
         assert_ne!(a, b);
         assert_ne!(b, r);
     }
@@ -139,10 +152,11 @@ mod tests {
         let world = World::seeded();
         assert!(!world.bees.is_empty());
         assert!(!world.resources.is_empty());
-        // Every bee starts inside the bounds.
+        // Every bee starts inside the bounds, flat on the z = 0 plane for now.
         for bee in &world.bees {
             assert!(bee.position.x >= 0.0 && bee.position.x <= world.bounds.width);
             assert!(bee.position.y >= 0.0 && bee.position.y <= world.bounds.height);
+            assert_eq!(bee.position.z, 0.0);
         }
     }
 
@@ -155,6 +169,7 @@ mod tests {
         for bee in &world.bees {
             assert!(bee.position.x >= 0.0 && bee.position.x <= world.bounds.width);
             assert!(bee.position.y >= 0.0 && bee.position.y <= world.bounds.height);
+            assert!(bee.position.z >= 0.0 && bee.position.z <= world.bounds.depth);
         }
     }
 }
