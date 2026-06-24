@@ -15,6 +15,6 @@ pub mod world;
 pub use bee::{Bee, BeeState};
 pub use engine::Engine;
 pub use entity::EntityId;
-pub use math::Vec2;
+pub use math::Vec3;
 pub use snapshot::{BeeSnapshot, ResourceSnapshot, WorldSnapshot};
 pub use world::{Bounds, Resource, ResourceKind, World};

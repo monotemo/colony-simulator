@@ -12,6 +12,10 @@ import { WorldSnapshot } from './models';
 /**
  * Renders the world onto a `<canvas>`: the bounds rectangle, nectar resources,
  * and every bee as a dot. Redraws whenever a new snapshot arrives.
+ *
+ * This is a flat projection onto the x/y plane — positions carry a `z` (flight)
+ * axis that is intentionally ignored here until depth rendering lands. Entities
+ * are all at `z = 0` today, so the projection is currently lossless.
  */
 @Component({
   selector: 'app-world-canvas',

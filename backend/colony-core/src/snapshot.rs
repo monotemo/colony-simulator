@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bee::{Bee, BeeState};
-use crate::math::Vec2;
+use crate::math::Vec3;
 use crate::world::{Bounds, Resource, ResourceKind, World};
 
 /// A complete, immutable view of the world at one tick.
@@ -22,14 +22,14 @@ pub struct WorldSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BeeSnapshot {
     pub id: u64,
-    pub position: Vec2,
+    pub position: Vec3,
     pub state: BeeState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceSnapshot {
     pub id: u64,
-    pub position: Vec2,
+    pub position: Vec3,
     pub kind: ResourceKind,
 }
 
