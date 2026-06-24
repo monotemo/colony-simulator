@@ -1,0 +1,17 @@
+[package]
+name = "colony-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Axum server that runs the colony simulation and streams it over WebSocket."
+
+[dependencies]
+colony-core = { path = "../colony-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
