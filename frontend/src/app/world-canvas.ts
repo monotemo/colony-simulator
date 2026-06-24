@@ -10,8 +10,8 @@ import { SimulationService } from './simulation.service';
 import { WorldSnapshot } from './models';
 
 /**
- * Renders the world onto a `<canvas>`: the bounds rectangle, nectar resources,
- * and every bee as a dot. Redraws whenever a new snapshot arrives.
+ * Renders the world onto a `<canvas>`: the bounds rectangle, nectar resources
+ * (🌼), and every bee (🐝). Redraws whenever a new snapshot arrives.
  *
  * This is a flat projection onto the x/y plane — positions carry a `z` (flight)
  * axis that is intentionally ignored here until depth rendering lands. Entities
@@ -65,25 +65,21 @@ export class WorldCanvas {
 
     ctx.clearRect(0, 0, width, height);
 
-    // Resources (nectar) — amber diamonds.
-    ctx.fillStyle = '#f4b942';
+    // Center each glyph on its world position.
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Resources (nectar) — flower glyphs.
+    ctx.font = '14px sans-serif';
     for (const resource of snapshot.resources) {
       const { x, y } = resource.position;
-      ctx.beginPath();
-      ctx.moveTo(x, y - 7);
-      ctx.lineTo(x + 7, y);
-      ctx.lineTo(x, y + 7);
-      ctx.lineTo(x - 7, y);
-      ctx.closePath();
-      ctx.fill();
+      ctx.fillText('🌼', x, y);
     }
 
-    // Bees — small dots.
-    ctx.fillStyle = '#ffd23f';
+    // Bees — bee glyphs.
+    ctx.font = '12px sans-serif';
     for (const bee of snapshot.bees) {
-      ctx.beginPath();
-      ctx.arc(bee.position.x, bee.position.y, 4, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillText('🐝', bee.position.x, bee.position.y);
     }
   }
 }
