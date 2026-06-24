@@ -1,0 +1,160 @@
+//! The world: physical bounds, resources, and the entities living inside it.
+
+use serde::{Deserialize, Serialize};
+
+use crate::bee::Bee;
+use crate::entity::{EntityId, IdAllocator};
+use crate::math::Vec2;
+
+/// The rectangular extent of the world, in world units. The origin is the
+/// top-left corner; valid positions satisfy `0 <= x <= width` and
+/// `0 <= y <= height`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Bounds {
+    pub const fn new(width: f64, height: f64) -> Self {
+        Self { width, height }
+    }
+}
+
+/// Kinds of resource a bee may eventually interact with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    /// A nectar source (flower). Rendered now; foraging comes in a later slice.
+    Nectar,
+}
+
+/// A static resource node in the world.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resource {
+    pub id: EntityId,
+    pub position: Vec2,
+    pub kind: ResourceKind,
+}
+
+/// The simulation world: bounds, the bee population, and resource nodes.
+#[derive(Debug, Clone)]
+pub struct World {
+    pub bounds: Bounds,
+    pub bees: Vec<Bee>,
+    pub resources: Vec<Resource>,
+    ids: IdAllocator,
+}
+
+impl World {
+    /// Create an empty world with the given bounds.
+    pub fn empty(bounds: Bounds) -> Self {
+        Self {
+            bounds,
+            bees: Vec::new(),
+            resources: Vec::new(),
+            ids: IdAllocator::new(),
+        }
+    }
+
+    /// Spawn a bee at `position` with `velocity`, allocating it a fresh id.
+    pub fn spawn_bee(&mut self, position: Vec2, velocity: Vec2) -> EntityId {
+        let id = self.ids.alloc();
+        self.bees.push(Bee::new(id, position, velocity));
+        id
+    }
+
+    /// Add a resource node at `position`, allocating it a fresh id.
+    pub fn add_resource(&mut self, position: Vec2, kind: ResourceKind) -> EntityId {
+        let id = self.ids.alloc();
+        self.resources.push(Resource {
+            id,
+            position,
+            kind,
+        });
+        id
+    }
+
+    /// Build a seeded starting world: a clutch of bees with deterministic,
+    /// varied velocities plus a few nectar sources. Deterministic so the
+    /// initial state is reproducible without pulling in an RNG dependency.
+    pub fn seeded() -> Self {
+        let bounds = Bounds::new(800.0, 600.0);
+        let mut world = World::empty(bounds);
+
+        let bee_count = 24;
+        for i in 0..bee_count {
+            let t = i as f64 / bee_count as f64;
+            // Spread starting positions across the interior.
+            let position = Vec2::new(
+                bounds.width * (0.2 + 0.6 * fract(t * 7.0)),
+                bounds.height * (0.2 + 0.6 * fract(t * 3.0)),
+            );
+            // Varied directions at a steady speed.
+            let angle = t * std::f64::consts::TAU * 3.0;
+            let speed = 60.0;
+            let velocity = Vec2::new(angle.cos() * speed, angle.sin() * speed);
+            world.spawn_bee(position, velocity);
+        }
+
+        for (fx, fy) in [(0.25, 0.3), (0.7, 0.25), (0.5, 0.75), (0.8, 0.7)] {
+            world.add_resource(
+                Vec2::new(bounds.width * fx, bounds.height * fy),
+                ResourceKind::Nectar,
+            );
+        }
+
+        world
+    }
+
+    /// Advance every bee by one fixed timestep of `dt` seconds.
+    pub fn step(&mut self, dt: f64) {
+        for bee in &mut self.bees {
+            bee.step(dt, self.bounds);
+        }
+    }
+}
+
+/// Fractional part of `x`, in `[0, 1)`.
+fn fract(x: f64) -> f64 {
+    x - x.floor()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_assigns_unique_ids() {
+        let mut world = World::empty(Bounds::new(100.0, 100.0));
+        let a = world.spawn_bee(Vec2::ZERO, Vec2::ZERO);
+        let b = world.spawn_bee(Vec2::ZERO, Vec2::ZERO);
+        let r = world.add_resource(Vec2::ZERO, ResourceKind::Nectar);
+        assert_ne!(a, b);
+        assert_ne!(b, r);
+    }
+
+    #[test]
+    fn seeded_world_has_population_and_resources() {
+        let world = World::seeded();
+        assert!(!world.bees.is_empty());
+        assert!(!world.resources.is_empty());
+        // Every bee starts inside the bounds.
+        for bee in &world.bees {
+            assert!(bee.position.x >= 0.0 && bee.position.x <= world.bounds.width);
+            assert!(bee.position.y >= 0.0 && bee.position.y <= world.bounds.height);
+        }
+    }
+
+    #[test]
+    fn step_keeps_all_bees_in_bounds() {
+        let mut world = World::seeded();
+        for _ in 0..1000 {
+            world.step(1.0 / 30.0);
+        }
+        for bee in &world.bees {
+            assert!(bee.position.x >= 0.0 && bee.position.x <= world.bounds.width);
+            assert!(bee.position.y >= 0.0 && bee.position.y <= world.bounds.height);
+        }
+    }
+}
