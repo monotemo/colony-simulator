@@ -35,7 +35,7 @@ import { WorldSnapshot } from './models';
       .world {
         display: block;
         width: 100%;
-        /* World is 800x600 (4:3); the camera letterboxes if this differs. */
+        /* Default until the first snapshot; then set from world bounds. */
         aspect-ratio: 4 / 3;
         height: auto;
         background: #1b1b1f;
@@ -69,6 +69,11 @@ export class WorldCanvas implements OnDestroy {
   private readonly flowerMaterial = new THREE.MeshStandardMaterial({
     color: 0xff5fa2,
     roughness: 0.7,
+  });
+  // Shared across ground rebuilds; only the plane geometry changes with bounds.
+  private readonly groundMaterial = new THREE.MeshStandardMaterial({
+    color: 0x222228,
+    roughness: 1,
   });
 
   // Live meshes keyed by stable entity id, reconciled each snapshot.
@@ -150,6 +155,8 @@ export class WorldCanvas implements OnDestroy {
     if (width !== this.worldWidth || height !== this.worldHeight) {
       this.worldWidth = width;
       this.worldHeight = height;
+      // Match the element's box to the world so the camera never letterboxes.
+      this.canvas().nativeElement.style.aspectRatio = `${width} / ${height}`;
       this.rebuildGround();
       this.updateCamera();
     }
@@ -209,11 +216,7 @@ export class WorldCanvas implements OnDestroy {
       this.ground.geometry.dispose();
     }
     const geometry = new THREE.PlaneGeometry(this.worldWidth, this.worldHeight);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x222228,
-      roughness: 1,
-    });
-    const ground = new THREE.Mesh(geometry, material);
+    const ground = new THREE.Mesh(geometry, this.groundMaterial);
     // Centre the plane on the world; sit it just behind the entities (z < 0).
     ground.position.set(this.worldWidth / 2, this.worldHeight / 2, -1);
     this.ground = ground;
@@ -298,7 +301,7 @@ export class WorldCanvas implements OnDestroy {
     this.flowerGeometry.dispose();
     this.flowerMaterial.dispose();
     this.ground?.geometry.dispose();
-    (this.ground?.material as THREE.Material | undefined)?.dispose();
+    this.groundMaterial.dispose();
     this.renderer?.dispose();
   }
 }
