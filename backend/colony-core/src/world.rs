@@ -1,5 +1,7 @@
 //! The world: physical bounds, resources, and the entities living inside it.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bee::Bee;
@@ -174,39 +176,107 @@ impl World {
     /// returned in bee order. Pure and read-only: it touches no mutable state,
     /// which is what lets [`World::step`] apply the whole batch atomically.
     ///
-    /// Each unordered pair of bees closer than `SEPARATION_RADIUS` contributes
-    /// an equal-and-opposite push along the line between them, ramping linearly
-    /// from zero at the radius to `SEPARATION_STRENGTH` at full overlap. Walking
-    /// the pairs in a fixed `i < j` order pins the floating-point summation
-    /// order, so the totals are bit-for-bit reproducible. Bees with no close
-    /// neighbour accumulate [`Vec3::ZERO`].
+    /// Each pair of bees closer than `SEPARATION_RADIUS` contributes an
+    /// equal-and-opposite push along the line between them (see
+    /// [`World::separation_push`]). Bees with no close neighbour accumulate
+    /// [`Vec3::ZERO`].
     ///
-    /// This is the naive O(n²) reference. A spatial-grid broad phase can replace
-    /// the inner loop while preserving this exact contract.
+    /// Broad phase is a uniform grid with cell size `SEPARATION_RADIUS`: each bee
+    /// is bucketed by its cell, and only the 3×3×3 block of cells around it can
+    /// hold a bee within range, so we never test the far-field pairs that dominate
+    /// the O(n²) cost. Within each bee we gather candidate neighbours and process
+    /// them in ascending index order, which reproduces the naive all-pairs
+    /// summation order exactly — the `grid_matches_naive` test guards that
+    /// equivalence. The grid is read only via fixed-key lookups, so `HashMap`'s
+    /// arbitrary iteration order never leaks into the result and determinism holds.
+    ///
+    /// The grid is used at every population. Below ~1k bees a plain all-pairs scan
+    /// is actually faster in absolute terms, but only by hundreds of nanoseconds
+    /// against a 33ms frame budget — far below anything we'd feel — so we keep one
+    /// strategy rather than branch on size. The all-pairs scan survives as the
+    /// test-only correctness oracle.
     fn separation_accelerations(&self) -> Vec<Vec3> {
-        let mut accelerations = vec![Vec3::ZERO; self.bees.len()];
-        let radius_squared = SEPARATION_RADIUS * SEPARATION_RADIUS;
+        let n = self.bees.len();
+        let mut accelerations = vec![Vec3::ZERO; n];
 
-        for i in 0..self.bees.len() {
-            for j in (i + 1)..self.bees.len() {
-                let offset = self.bees[i].position.sub(self.bees[j].position);
-                let distance_squared = offset.length_squared();
-                // Skip pairs out of range, and coincident bees (offset has no
-                // direction to push along — they stay put until something else
-                // nudges them apart).
-                if distance_squared >= radius_squared || distance_squared == 0.0 {
-                    continue;
+        // Bucket bee indices by grid cell. Indices are inserted in ascending
+        // order, so each bucket stays sorted for free.
+        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            grid.entry(cell_of(self.bees[i].position)).or_default().push(i);
+        }
+
+        let mut candidates: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let (cx, cy, cz) = cell_of(self.bees[i].position);
+            candidates.clear();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                            candidates.extend(bucket.iter().copied().filter(|&j| j > i));
+                        }
+                    }
                 }
-                let distance = distance_squared.sqrt();
-                let closeness = (SEPARATION_RADIUS - distance) / SEPARATION_RADIUS;
-                let push = offset.scale(SEPARATION_STRENGTH * closeness / distance);
-                accelerations[i] = accelerations[i].add(push);
-                accelerations[j] = accelerations[j].sub(push);
+            }
+            // Ascending `j` so the running sums into `accelerations[i]` and the
+            // matching subtractions into `accelerations[j]` land in the same
+            // order as the naive reference, keeping the totals bit-identical.
+            candidates.sort_unstable();
+            for &j in &candidates {
+                if let Some(push) = self.separation_push(i, j) {
+                    accelerations[i] = accelerations[i].add(push);
+                    accelerations[j] = accelerations[j].sub(push);
+                }
             }
         }
 
         accelerations
     }
+
+    /// The push that bee `i` feels away from bee `j` (bee `j` feels its
+    /// negation). `None` when the pair is out of range, or coincident — a
+    /// zero-length offset has no direction to push along, so such bees stay put
+    /// until something else nudges them apart. The magnitude ramps linearly
+    /// from zero at `SEPARATION_RADIUS` to `SEPARATION_STRENGTH` at full overlap.
+    fn separation_push(&self, i: usize, j: usize) -> Option<Vec3> {
+        let offset = self.bees[i].position.sub(self.bees[j].position);
+        let distance_squared = offset.length_squared();
+        if distance_squared >= SEPARATION_RADIUS * SEPARATION_RADIUS || distance_squared == 0.0 {
+            return None;
+        }
+        let distance = distance_squared.sqrt();
+        let closeness = (SEPARATION_RADIUS - distance) / SEPARATION_RADIUS;
+        Some(offset.scale(SEPARATION_STRENGTH * closeness / distance))
+    }
+
+    /// Naive O(n²) all-pairs separation: the readable reference the grid is
+    /// validated against (`grid_matches_naive`). Walks every `i < j` pair in a
+    /// fixed order, which is the summation order the grid is built to reproduce.
+    #[cfg(test)]
+    fn separation_accelerations_all_pairs(&self) -> Vec<Vec3> {
+        let mut accelerations = vec![Vec3::ZERO; self.bees.len()];
+        for i in 0..self.bees.len() {
+            for j in (i + 1)..self.bees.len() {
+                if let Some(push) = self.separation_push(i, j) {
+                    accelerations[i] = accelerations[i].add(push);
+                    accelerations[j] = accelerations[j].sub(push);
+                }
+            }
+        }
+        accelerations
+    }
+}
+
+/// Grid cell coordinate for a position, at cell size `SEPARATION_RADIUS`. Two
+/// bees within that radius differ by at most one cell on each axis, so the
+/// 3×3×3 neighbourhood of a cell is guaranteed to contain every in-range pair.
+fn cell_of(position: Vec3) -> (i64, i64, i64) {
+    (
+        (position.x / SEPARATION_RADIUS).floor() as i64,
+        (position.y / SEPARATION_RADIUS).floor() as i64,
+        (position.z / SEPARATION_RADIUS).floor() as i64,
+    )
 }
 
 /// Fractional part of `x`, in `[0, 1)`.
@@ -305,6 +375,20 @@ mod tests {
         let swapped_accel = swapped.separation_accelerations();
         assert_eq!(accel[0], swapped_accel[1]);
         assert_eq!(accel[1], swapped_accel[0]);
+    }
+
+    #[test]
+    fn grid_matches_naive() {
+        // The spatial-grid broad phase must reproduce the all-pairs reference
+        // bit-for-bit, including after the swarm has clustered for a while.
+        let mut world = World::seeded_with_count(500);
+        for _ in 0..50 {
+            world.step(1.0 / 30.0);
+        }
+        assert_eq!(
+            world.separation_accelerations(),
+            world.separation_accelerations_all_pairs()
+        );
     }
 
     #[test]
