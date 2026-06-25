@@ -7,6 +7,7 @@ import { SimulationService } from './simulation.service';
 class StubSimulationService implements Partial<SimulationService> {
   readonly snapshot = signal(null);
   readonly connected = signal(false);
+  readonly running = signal(false);
   start(): void {}
   pause(): void {}
   reset(): void {}

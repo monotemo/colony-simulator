@@ -35,6 +35,11 @@ import { BeeState, WorldSnapshot } from './models';
   template: `<canvas #canvas class="world"></canvas>`,
   styles: [
     `
+      :host {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
       .world {
         display: block;
         width: 100%;
@@ -187,12 +192,12 @@ export class WorldCanvas implements OnDestroy {
     }
 
     // Resize landmarks/camera if the world bounds changed (e.g. after reset).
+    // The canvas fills its stage; `updateCamera` letterboxes the world within
+    // it to preserve the world's aspect ratio.
     const { width, height } = snapshot.bounds;
     if (width !== this.worldWidth || height !== this.worldHeight) {
       this.worldWidth = width;
       this.worldHeight = height;
-      // Match the element's box to the world so the camera never letterboxes.
-      this.canvas().nativeElement.style.aspectRatio = `${width} / ${height}`;
       this.rebuildLandmarks();
       this.updateCamera();
     }

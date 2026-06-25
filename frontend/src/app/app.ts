@@ -40,7 +40,7 @@ export class App {
   private readonly world = viewChild(WorldCanvas);
 
   /** Whether the engine is currently stepping (drives Start/Pause emphasis). */
-  readonly running = signal(false);
+  readonly running = this.sim.running;
   /** Active tick-rate multiplier. */
   readonly speed = signal<Speed>(1);
   readonly speeds: readonly Speed[] = [0.5, 1, 2];
@@ -110,17 +110,14 @@ export class App {
   readonly zoomPercent = computed(() => this.world()?.zoomPercent() ?? 100);
 
   start(): void {
-    this.running.set(true);
     this.sim.start();
   }
 
   pause(): void {
-    this.running.set(false);
     this.sim.pause();
   }
 
   reset(): void {
-    this.running.set(false);
     this.sim.reset();
   }
 

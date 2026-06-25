@@ -34,10 +34,11 @@ export class WasmSimulationService extends SimulationService {
 
   readonly snapshot = signal<WorldSnapshot | null>(null);
   readonly connected = signal(false);
+  // The engine begins stepping as soon as it loads.
+  readonly running = signal(true);
 
   private engine?: WasmEngine;
   private timer?: ReturnType<typeof setInterval>;
-  private running = true;
   private disposed = false;
   /** Tick-rate multiplier set via {@link setSpeed} (0.5×, 1×, 2×). */
   private speed = 1;
@@ -49,11 +50,11 @@ export class WasmSimulationService extends SimulationService {
   }
 
   start(): void {
-    this.running = true;
+    this.running.set(true);
   }
 
   pause(): void {
-    this.running = false;
+    this.running.set(false);
   }
 
   reset(): void {
@@ -97,7 +98,7 @@ export class WasmSimulationService extends SimulationService {
     clearInterval(this.timer);
     const dt = 1 / TICK_HZ;
     this.timer = setInterval(() => {
-      if (!this.running || !this.engine) {
+      if (!this.running() || !this.engine) {
         return;
       }
       this.engine.step(dt);
