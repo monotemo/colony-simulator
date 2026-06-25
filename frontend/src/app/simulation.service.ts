@@ -24,4 +24,11 @@ export abstract class SimulationService {
   abstract pause(): void;
   /** Reset to a fresh seeded world. */
   abstract reset(): void;
+
+  /**
+   * Set the tick-rate multiplier (e.g. `0.5`, `1`, `2`). Sources that cannot
+   * vary their rate (the fixed-rate server stream) may ignore this; the
+   * in-browser wasm engine honours it. Defaults to a no-op.
+   */
+  setSpeed(_multiplier: number): void {}
 }

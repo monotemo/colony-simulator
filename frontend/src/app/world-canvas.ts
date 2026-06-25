@@ -5,26 +5,29 @@ import {
   afterNextRender,
   effect,
   inject,
+  signal,
   viewChild,
   ChangeDetectionStrategy,
 } from '@angular/core';
 import * as THREE from 'three';
 import { SimulationService } from './simulation.service';
-import { WorldSnapshot } from './models';
+import { BeeState, WorldSnapshot } from './models';
 
 /**
- * Renders the world with three.js: the bounds rectangle as a ground plane,
- * nectar resources as flat discs, and every bee as a small sphere.
+ * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
+ * as small glowing dots tinted by behavior state, nectar resources as
+ * terracotta discs, and a central hive with its queen just above it.
  *
  * The view is a top-down orthographic camera looking straight down the world's
- * `z` (flight) axis, so the screen shows the x/y plane just like the previous
- * 2D renderer. World `y` grows downward on screen (origin top-left), matching
- * the old canvas orientation. `z` raises an entity toward the camera; it is `0`
+ * `z` (flight) axis, so the screen shows the x/y plane. World `y` grows downward
+ * on screen (origin top-left). `z` raises an entity toward the camera; it is `0`
  * for every entity today but is mapped through so depth/flight rendering works
  * for free once the simulation populates it.
  *
- * The scene is redrawn whenever a new snapshot arrives (~30 Hz), on mouse-wheel
- * zoom, and on resize. There is no continuous animation loop.
+ * The canvas is transparent: the warm radial-gradient "stage" behind it (styled
+ * in the dashboard SCSS) shows through as the colony floor, so there is no
+ * opaque ground plane. The scene is redrawn whenever a new snapshot arrives
+ * (~30 Hz), on zoom, and on resize — there is no continuous animation loop.
  */
 @Component({
   selector: 'app-world-canvas',
@@ -35,12 +38,7 @@ import { WorldSnapshot } from './models';
       .world {
         display: block;
         width: 100%;
-        /* Default until the first snapshot; then set from world bounds. */
-        aspect-ratio: 4 / 3;
-        height: auto;
-        background: #1b1b1f;
-        border: 1px solid #3a3a40;
-        border-radius: 8px;
+        height: 100%;
       }
     `,
   ],
@@ -50,7 +48,8 @@ export class WorldCanvas implements OnDestroy {
   private readonly canvas =
     viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
 
-  private readonly background = new THREE.Color('#1b1b1f');
+  /** Current camera zoom as a whole percentage, for the dock readout. */
+  readonly zoomPercent = signal(100);
 
   // three.js handles, created in afterNextRender (browser only).
   private renderer?: THREE.WebGLRenderer;
@@ -61,34 +60,37 @@ export class WorldCanvas implements OnDestroy {
 
   // Shared geometry/materials — one of each, reused across every entity.
   private readonly beeGeometry = new THREE.SphereGeometry(7, 16, 16);
-  private readonly beeMaterial = new THREE.MeshStandardMaterial({
-    color: 0xffcc33,
-    roughness: 0.5,
-  });
+  // Bee body tinted by behavior state (wandering gold / foraging sage / resting
+  // dim). The emissive lift gives the "glow" the design calls for.
+  private readonly beeMaterials: Record<BeeState, THREE.MeshStandardMaterial> = {
+    wandering: this.glowMaterial(0xe2a12b, 0xf3b84a, 0.45),
+    foraging: this.glowMaterial(0x7c8b5a, 0x9aae6e, 0.35),
+    resting: this.glowMaterial(0xc99a38, 0xc99a38, 0.12),
+  };
   private readonly flowerGeometry = new THREE.CircleGeometry(9, 24);
-  private readonly flowerMaterial = new THREE.MeshStandardMaterial({
-    color: 0xff5fa2,
-    roughness: 0.7,
-  });
-  // Shared across ground rebuilds; only the plane geometry changes with bounds.
-  private readonly groundMaterial = new THREE.MeshStandardMaterial({
-    color: 0x222228,
-    roughness: 1,
-  });
+  private readonly flowerMaterial = this.glowMaterial(0xc9663c, 0xe68a5e, 0.25);
+
+  // Central landmarks, derived from the world bounds (no wire data yet).
+  private readonly hiveGeometry = new THREE.CircleGeometry(1, 6);
+  private readonly hiveMaterial = this.glowMaterial(0xd5901f, 0xf3ba4d, 0.55);
+  private readonly queenGeometry = new THREE.SphereGeometry(1, 16, 16);
+  private readonly queenMaterial = this.glowMaterial(0xe0a12b, 0xffe08a, 0.7);
+  private hive?: THREE.Mesh;
+  private queen?: THREE.Mesh;
 
   // Live meshes keyed by stable entity id, reconciled each snapshot.
   private readonly beeMeshes = new Map<number, THREE.Mesh>();
   private readonly flowerMeshes = new Map<number, THREE.Mesh>();
-  private ground?: THREE.Mesh;
 
-  /** World bounds the camera/ground are currently sized for. */
+  /** World bounds the camera/landmarks are currently sized for. */
   private worldWidth = 0;
   private worldHeight = 0;
 
-  /** Camera zoom factor driven by the mouse wheel. */
+  /** Camera zoom factor driven by the wheel and dock zoom stepper. */
   private zoom = 1;
   private static readonly MIN_ZOOM = 0.2;
   private static readonly MAX_ZOOM = 8;
+  private static readonly ZOOM_STEP = 1.1;
 
   constructor() {
     // Build the three.js scene once the canvas element is in the DOM. This runs
@@ -104,21 +106,55 @@ export class WorldCanvas implements OnDestroy {
     });
   }
 
+  /** A warm body colour with an emissive lift, for the soft dot "glow". */
+  private glowMaterial(
+    color: number,
+    emissive: number,
+    intensity: number,
+  ): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      color,
+      emissive,
+      emissiveIntensity: intensity,
+      roughness: 0.55,
+    });
+  }
+
+  /** Step the camera zoom in (closer). Called by the dock `+` button. */
+  zoomIn(): void {
+    this.applyZoom(WorldCanvas.ZOOM_STEP);
+  }
+
+  /** Step the camera zoom out (further). Called by the dock `−` button. */
+  zoomOut(): void {
+    this.applyZoom(1 / WorldCanvas.ZOOM_STEP);
+  }
+
+  private applyZoom(factor: number): void {
+    this.zoom = Math.min(
+      WorldCanvas.MAX_ZOOM,
+      Math.max(WorldCanvas.MIN_ZOOM, this.zoom * factor),
+    );
+    this.zoomPercent.set(Math.round(this.zoom * 100));
+    this.updateCamera();
+    this.renderCurrent();
+  }
+
   private init(): void {
     const canvas = this.canvas().nativeElement;
 
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      // Transparent so the CSS gradient stage reads as the colony floor.
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     } catch {
       // No WebGL context available (e.g. headless test env) — bail gracefully.
       return;
     }
-    renderer.setClearColor(this.background);
+    renderer.setClearColor(0x000000, 0);
     this.renderer = renderer;
 
     const scene = new THREE.Scene();
-    scene.background = this.background;
     this.scene = scene;
 
     // Top-down orthographic camera looking straight down -z onto the x/y plane.
@@ -126,8 +162,8 @@ export class WorldCanvas implements OnDestroy {
     camera.position.z = 2000;
     this.camera = camera;
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-    const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+    scene.add(new THREE.AmbientLight(0xfff4dd, 0.95));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.5);
     sun.position.set(0.4, 0.6, 1);
     scene.add(sun);
 
@@ -150,28 +186,25 @@ export class WorldCanvas implements OnDestroy {
       return;
     }
 
-    // Resize the ground/camera if the world bounds changed (e.g. after reset).
+    // Resize landmarks/camera if the world bounds changed (e.g. after reset).
     const { width, height } = snapshot.bounds;
     if (width !== this.worldWidth || height !== this.worldHeight) {
       this.worldWidth = width;
       this.worldHeight = height;
       // Match the element's box to the world so the camera never letterboxes.
       this.canvas().nativeElement.style.aspectRatio = `${width} / ${height}`;
-      this.rebuildGround();
+      this.rebuildLandmarks();
       this.updateCamera();
     }
 
-    this.reconcile(
-      this.beeMeshes,
-      this.beeGeometry,
-      this.beeMaterial,
-      snapshot.bees,
+    this.reconcile(this.beeMeshes, this.beeGeometry, snapshot.bees, (bee) =>
+      this.beeMaterials[bee.state] ?? this.beeMaterials.wandering,
     );
     this.reconcile(
       this.flowerMeshes,
       this.flowerGeometry,
-      this.flowerMaterial,
       snapshot.resources,
+      () => this.flowerMaterial,
     );
 
     renderer.render(scene, camera);
@@ -180,22 +213,24 @@ export class WorldCanvas implements OnDestroy {
   /**
    * Create/update/remove meshes so the map mirrors `entities` exactly, keyed by
    * stable id. World `y` is flipped (`height - y`) so the origin sits top-left
-   * on screen, matching the previous 2D renderer.
+   * on screen. `material` resolves per entity so bees can be tinted by state.
    */
-  private reconcile(
+  private reconcile<T extends { id: number; position: { x: number; y: number; z: number } }>(
     meshes: Map<number, THREE.Mesh>,
     geometry: THREE.BufferGeometry,
-    material: THREE.Material,
-    entities: ReadonlyArray<{ id: number; position: { x: number; y: number; z: number } }>,
+    entities: ReadonlyArray<T>,
+    material: (entity: T) => THREE.Material,
   ): void {
     const seen = new Set<number>();
     for (const entity of entities) {
       seen.add(entity.id);
       let mesh = meshes.get(entity.id);
       if (!mesh) {
-        mesh = new THREE.Mesh(geometry, material);
+        mesh = new THREE.Mesh(geometry, material(entity));
         meshes.set(entity.id, mesh);
         this.scene!.add(mesh);
+      } else {
+        mesh.material = material(entity);
       }
       const { x, y, z } = entity.position;
       mesh.position.set(x, this.worldHeight - y, z);
@@ -210,17 +245,32 @@ export class WorldCanvas implements OnDestroy {
     }
   }
 
-  private rebuildGround(): void {
-    if (this.ground) {
-      this.scene!.remove(this.ground);
-      this.ground.geometry.dispose();
+  /**
+   * Place the hive at the world centre and the queen just above it, scaled to
+   * the world size. They have no wire representation yet, so they are derived
+   * purely from the bounds — one hive, one queen, matching the rail's counts.
+   */
+  private rebuildLandmarks(): void {
+    const cx = this.worldWidth / 2;
+    const cy = this.worldHeight / 2;
+    const unit = Math.min(this.worldWidth, this.worldHeight);
+    const hiveRadius = unit * 0.06;
+    const queenRadius = unit * 0.012;
+
+    if (!this.hive) {
+      this.hive = new THREE.Mesh(this.hiveGeometry, this.hiveMaterial);
+      this.scene!.add(this.hive);
     }
-    const geometry = new THREE.PlaneGeometry(this.worldWidth, this.worldHeight);
-    const ground = new THREE.Mesh(geometry, this.groundMaterial);
-    // Centre the plane on the world; sit it just behind the entities (z < 0).
-    ground.position.set(this.worldWidth / 2, this.worldHeight / 2, -1);
-    this.ground = ground;
-    this.scene!.add(ground);
+    this.hive.position.set(cx, cy, 0.5);
+    this.hive.scale.setScalar(hiveRadius);
+
+    if (!this.queen) {
+      this.queen = new THREE.Mesh(this.queenGeometry, this.queenMaterial);
+      this.scene!.add(this.queen);
+    }
+    // Above the hive centre on screen (smaller screen-y ⇒ larger world-y).
+    this.queen.position.set(cx, cy + hiveRadius * 0.6, 1);
+    this.queen.scale.setScalar(queenRadius);
   }
 
   /** Frame the whole world, letterboxing to preserve aspect ratio. */
@@ -274,13 +324,7 @@ export class WorldCanvas implements OnDestroy {
 
   private handleWheel(event: WheelEvent): void {
     event.preventDefault();
-    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-    this.zoom = Math.min(
-      WorldCanvas.MAX_ZOOM,
-      Math.max(WorldCanvas.MIN_ZOOM, this.zoom * factor),
-    );
-    this.updateCamera();
-    this.renderCurrent();
+    this.applyZoom(event.deltaY < 0 ? WorldCanvas.ZOOM_STEP : 1 / WorldCanvas.ZOOM_STEP);
   }
 
   /** Re-render the latest snapshot after a camera-only change (zoom/resize). */
@@ -297,11 +341,15 @@ export class WorldCanvas implements OnDestroy {
     this.resizeObserver?.disconnect();
 
     this.beeGeometry.dispose();
-    this.beeMaterial.dispose();
+    for (const material of Object.values(this.beeMaterials)) {
+      material.dispose();
+    }
     this.flowerGeometry.dispose();
     this.flowerMaterial.dispose();
-    this.ground?.geometry.dispose();
-    this.groundMaterial.dispose();
+    this.hiveGeometry.dispose();
+    this.hiveMaterial.dispose();
+    this.queenGeometry.dispose();
+    this.queenMaterial.dispose();
     this.renderer?.dispose();
   }
 }

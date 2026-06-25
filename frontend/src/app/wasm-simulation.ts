@@ -39,6 +39,8 @@ export class WasmSimulationService extends SimulationService {
   private timer?: ReturnType<typeof setInterval>;
   private running = true;
   private disposed = false;
+  /** Tick-rate multiplier set via {@link setSpeed} (0.5×, 1×, 2×). */
+  private speed = 1;
 
   constructor() {
     super();
@@ -59,6 +61,19 @@ export class WasmSimulationService extends SimulationService {
     this.publish();
   }
 
+  override setSpeed(multiplier: number): void {
+    if (multiplier <= 0 || multiplier === this.speed) {
+      return;
+    }
+    this.speed = multiplier;
+    // Re-arm the stepping loop at the new cadence (steps per real second). The
+    // fixed `dt` keeps the physics stable; stepping more/less often scales the
+    // simulation's apparent speed.
+    if (this.timer !== undefined) {
+      this.startLoop();
+    }
+  }
+
   private async init(): Promise<void> {
     // Resolve against the document base href so it works under the Pages
     // subpath; the `@vite-ignore` keeps the bundler from trying to resolve it.
@@ -74,6 +89,12 @@ export class WasmSimulationService extends SimulationService {
     this.zone.run(() => this.connected.set(true));
     this.publish();
 
+    this.startLoop();
+  }
+
+  /** (Re)start the stepping loop at the current {@link speed} multiplier. */
+  private startLoop(): void {
+    clearInterval(this.timer);
     const dt = 1 / TICK_HZ;
     this.timer = setInterval(() => {
       if (!this.running || !this.engine) {
@@ -81,7 +102,7 @@ export class WasmSimulationService extends SimulationService {
       }
       this.engine.step(dt);
       this.publish();
-    }, 1000 / TICK_HZ);
+    }, 1000 / TICK_HZ / this.speed);
   }
 
   private publish(): void {
