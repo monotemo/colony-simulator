@@ -15,8 +15,9 @@ import { BeeState, WorldSnapshot } from './models';
 
 /**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
- * as small glowing dots tinted by behavior state, nectar resources as
- * terracotta discs, and a central hive with its queen just above it.
+ * as small striped, winged shapes tinted by behavior state and turned to face
+ * their heading, nectar resources as terracotta discs, and a central hive with
+ * its queen just above it.
  *
  * The view is a top-down orthographic camera looking straight down the world's
  * `z` (flight) axis, so the screen shows the x/y plane. World `y` grows downward
@@ -63,15 +64,37 @@ export class WorldCanvas implements OnDestroy {
   private resizeObserver?: ResizeObserver;
   private readonly onWheel = (event: WheelEvent) => this.handleWheel(event);
 
-  // Shared geometry/materials — one of each, reused across every entity.
-  private readonly beeGeometry = new THREE.SphereGeometry(7, 16, 16);
-  // Bee body tinted by behavior state (wandering gold / foraging sage / resting
-  // dim). The emissive lift gives the "glow" the design calls for.
+  // Shared geometry/materials — one of each, reused across every entity. A bee
+  // is composed from a handful of flat shapes laid out in the x/y plane: an
+  // elongated body pointing along +x (its heading), a dark head at the tip,
+  // dark abdomen stripes, and a pair of translucent wings. Every bee `Group`
+  // reuses these singletons; only the lightweight `Group`/child meshes are
+  // per-entity (see {@link createBee}).
+  private readonly beeBodyGeometry = new THREE.ShapeGeometry(this.ellipse(8, 5), 24);
+  private readonly beeStripeGeometry = new THREE.ShapeGeometry(this.ellipse(1.1, 4.6), 16);
+  private readonly beeWingGeometry = new THREE.ShapeGeometry(this.ellipse(3.6, 6), 20);
+  private readonly beeHeadGeometry = new THREE.CircleGeometry(3, 16);
+  // Body tinted by behavior state (wandering gold / foraging sage / resting
+  // dim); the emissive lift gives the soft "glow" the design calls for.
   private readonly beeMaterials: Record<BeeState, THREE.MeshStandardMaterial> = {
     wandering: this.glowMaterial(0xe2a12b, 0xf3b84a, 0.45),
     foraging: this.glowMaterial(0x7c8b5a, 0x9aae6e, 0.35),
     resting: this.glowMaterial(0xc99a38, 0xc99a38, 0.12),
   };
+  // Near-black bands for the head and abdomen stripes — the bee's contrast.
+  private readonly beeMarkingMaterial = this.glowMaterial(0x2a1c08, 0x3a2a10, 0.1);
+  // Gauzy wings: translucent and depth-write off so they blend over the body
+  // (and each other) without occluding it.
+  private readonly beeWingMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0xfff4dd,
+    emissiveIntensity: 0.25,
+    transparent: true,
+    opacity: 0.4,
+    roughness: 0.3,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
   private readonly flowerGeometry = new THREE.CircleGeometry(9, 24);
   private readonly flowerMaterial = this.glowMaterial(0xc9663c, 0xe68a5e, 0.25);
 
@@ -83,8 +106,9 @@ export class WorldCanvas implements OnDestroy {
   private hive?: THREE.Mesh;
   private queen?: THREE.Mesh;
 
-  // Live meshes keyed by stable entity id, reconciled each snapshot.
-  private readonly beeMeshes = new Map<number, THREE.Mesh>();
+  // Live meshes keyed by stable entity id, reconciled each snapshot. Bees are
+  // multi-part `Group`s (body + markings + wings); flowers are single meshes.
+  private readonly beeMeshes = new Map<number, THREE.Group>();
   private readonly flowerMeshes = new Map<number, THREE.Mesh>();
 
   /** World bounds the camera/landmarks are currently sized for. */
@@ -109,6 +133,13 @@ export class WorldCanvas implements OnDestroy {
         this.renderSnapshot(snapshot);
       }
     });
+  }
+
+  /** A flat ellipse `Shape` centred at the origin, for the bee's body parts. */
+  private ellipse(rx: number, ry: number): THREE.Shape {
+    const shape = new THREE.Shape();
+    shape.absellipse(0, 0, rx, ry, 0, Math.PI * 2, false, 0);
+    return shape;
   }
 
   /** A warm body colour with an emissive lift, for the soft dot "glow". */
@@ -202,9 +233,7 @@ export class WorldCanvas implements OnDestroy {
       this.updateCamera();
     }
 
-    this.reconcile(this.beeMeshes, this.beeGeometry, snapshot.bees, (bee) =>
-      this.beeMaterials[bee.state] ?? this.beeMaterials.wandering,
-    );
+    this.reconcileBees(snapshot.bees);
     this.reconcile(
       this.flowerMeshes,
       this.flowerGeometry,
@@ -246,6 +275,88 @@ export class WorldCanvas implements OnDestroy {
       if (!seen.has(id)) {
         this.scene!.remove(mesh);
         meshes.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Assemble one bee from the shared part geometries: an elongated body (the
+   * state-tinted glow), a dark head at the heading tip (`+x`), two abdomen
+   * stripes tapering toward the tail, and a translucent wing on each side. The
+   * `body` mesh is stashed in `userData` so reconciliation can recolour it by
+   * state without rebuilding the group. The bee is modelled pointing along `+x`
+   * and rotated about `z` to face its velocity (see {@link reconcileBees}).
+   */
+  private createBee(material: THREE.Material): THREE.Group {
+    const bee = new THREE.Group();
+
+    const body = new THREE.Mesh(this.beeBodyGeometry, material);
+    bee.add(body);
+    bee.userData['body'] = body;
+
+    // Dark head poking out past the front of the body.
+    const head = new THREE.Mesh(this.beeHeadGeometry, this.beeMarkingMaterial);
+    head.position.set(7.5, 0, 0.05);
+    bee.add(head);
+
+    // Two abdomen stripes on the rear half, narrowed to follow the body taper
+    // so they stay inside the silhouette. Lifted slightly in z to sit on top.
+    for (const [x, widthScale] of [
+      [-1, 1],
+      [-4.5, 0.78],
+    ] as const) {
+      const stripe = new THREE.Mesh(this.beeStripeGeometry, this.beeMarkingMaterial);
+      stripe.position.set(x, 0, 0.05);
+      stripe.scale.set(1, widthScale, 1);
+      bee.add(stripe);
+    }
+
+    // A wing on each flank, fanned slightly back and floated above the body.
+    for (const side of [1, -1]) {
+      const wing = new THREE.Mesh(this.beeWingGeometry, this.beeWingMaterial);
+      wing.position.set(2, side * 4.5, 0.3);
+      wing.rotation.z = side * 0.35;
+      bee.add(wing);
+    }
+
+    return bee;
+  }
+
+  /**
+   * Reconcile bee `Group`s against the snapshot, keyed by stable id (mirrors the
+   * generic {@link reconcile}, but bees are composite groups rather than single
+   * meshes). Each bee is positioned with the world-`y` flip and rotated about
+   * `z` to face its velocity — on screen `y` is flipped, so the heading angle
+   * negates `vy`. A near-stationary bee keeps its previous facing.
+   */
+  private reconcileBees(bees: WorldSnapshot['bees']): void {
+    const seen = new Set<number>();
+    for (const bee of bees) {
+      seen.add(bee.id);
+      const material = this.beeMaterials[bee.state] ?? this.beeMaterials.wandering;
+      let group = this.beeMeshes.get(bee.id);
+      if (!group) {
+        group = this.createBee(material);
+        this.beeMeshes.set(bee.id, group);
+        this.scene!.add(group);
+      } else {
+        (group.userData['body'] as THREE.Mesh).material = material;
+      }
+
+      const { x, y, z } = bee.position;
+      group.position.set(x, this.worldHeight - y, z);
+
+      const vx = bee.velocity?.x ?? 0;
+      const vy = bee.velocity?.y ?? 0;
+      if (vx * vx + vy * vy > 1e-6) {
+        group.rotation.z = Math.atan2(-vy, vx);
+      }
+    }
+
+    for (const [id, group] of this.beeMeshes) {
+      if (!seen.has(id)) {
+        this.scene!.remove(group);
+        this.beeMeshes.delete(id);
       }
     }
   }
@@ -345,10 +456,15 @@ export class WorldCanvas implements OnDestroy {
     canvas.removeEventListener('wheel', this.onWheel);
     this.resizeObserver?.disconnect();
 
-    this.beeGeometry.dispose();
+    this.beeBodyGeometry.dispose();
+    this.beeStripeGeometry.dispose();
+    this.beeWingGeometry.dispose();
+    this.beeHeadGeometry.dispose();
     for (const material of Object.values(this.beeMaterials)) {
       material.dispose();
     }
+    this.beeMarkingMaterial.dispose();
+    this.beeWingMaterial.dispose();
     this.flowerGeometry.dispose();
     this.flowerMaterial.dispose();
     this.hiveGeometry.dispose();
