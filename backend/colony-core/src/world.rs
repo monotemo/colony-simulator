@@ -105,7 +105,7 @@ impl World {
             );
             // Varied directions at a steady speed, in the z = 0 plane for now.
             let angle = t * std::f64::consts::TAU * 3.0;
-            let speed = 60.0;
+            let speed = 60.0 * fract(t + 0.5);
             let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
             world.spawn_bee(position, velocity);
         }

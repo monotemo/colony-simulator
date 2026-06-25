@@ -23,6 +23,7 @@ pub struct WorldSnapshot {
 pub struct BeeSnapshot {
     pub id: u64,
     pub position: Vec3,
+    pub velocity: Vec3,
     pub state: BeeState,
 }
 
@@ -54,6 +55,7 @@ impl BeeSnapshot {
         Self {
             id: bee.id.value(),
             position: bee.position,
+            velocity: bee.velocity,
             state: bee.state,
         }
     }
