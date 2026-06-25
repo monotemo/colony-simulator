@@ -17,6 +17,12 @@ export abstract class SimulationService {
   abstract readonly snapshot: Signal<WorldSnapshot | null>;
   /** Whether the source is live (socket open / wasm engine loaded). */
   abstract readonly connected: Signal<boolean>;
+  /**
+   * Whether the simulation is currently stepping. Both transports start in the
+   * running state, so this is the source of truth for Start/Pause emphasis —
+   * the UI binds to it rather than tracking its own guess.
+   */
+  abstract readonly running: Signal<boolean>;
 
   /** Resume stepping the simulation. */
   abstract start(): void;
@@ -24,4 +30,11 @@ export abstract class SimulationService {
   abstract pause(): void;
   /** Reset to a fresh seeded world. */
   abstract reset(): void;
+
+  /**
+   * Set the tick-rate multiplier (e.g. `0.5`, `1`, `2`). Sources that cannot
+   * vary their rate (the fixed-rate server stream) may ignore this; the
+   * in-browser wasm engine honours it. Defaults to a no-op.
+   */
+  setSpeed(_multiplier: number): void {}
 }

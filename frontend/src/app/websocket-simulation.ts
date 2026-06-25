@@ -16,6 +16,9 @@ export class WebSocketSimulationService extends SimulationService {
 
   readonly snapshot = signal<WorldSnapshot | null>(null);
   readonly connected = signal(false);
+  // The server spawns its simulation already running; we track command intent
+  // optimistically since snapshots don't carry a running flag.
+  readonly running = signal(true);
 
   private socket?: WebSocket;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -28,10 +31,12 @@ export class WebSocketSimulationService extends SimulationService {
   }
 
   start(): void {
+    this.running.set(true);
     void this.control('start');
   }
 
   pause(): void {
+    this.running.set(false);
     void this.control('pause');
   }
 

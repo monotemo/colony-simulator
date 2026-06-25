@@ -1,10 +1,12 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html, body {
   margin: 0;
-  background: #121214;
-  color: #eaeaea;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  height: 100%;
+  background: #F1E8D6;
+  color: #2C2214;
+  font-family: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }

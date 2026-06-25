@@ -1,7 +1,188 @@
-<main class="page">
-  <h1>🐝 Colony Simulator</h1>
-  <p class="subtitle">A live bee colony simulated in Rust, streamed over WebSocket.</p>
+<main class="app">
+  <!-- Header bar -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-logo" width="32" height="34" viewBox="0 0 22 24" aria-hidden="true">
+        <path d="M11 1.5 20.5 7 20.5 17 11 22.5 1.5 17 1.5 7Z" fill="#E7A52E" stroke="#C8841A" stroke-width="1.2" />
+        <circle cx="11" cy="12" r="3.3" fill="#5A3A0E" />
+      </svg>
+      <div class="brand-text">
+        <h1 class="brand-title">Colony Simulator</h1>
+        <span class="brand-sub">Apiary Engine</span>
+      </div>
+    </div>
 
-  <app-controls />
-  <app-world-canvas />
+    <div class="status-cluster">
+      <span class="mono tick">tick {{ tick().toLocaleString() }}</span>
+      <span class="divider"></span>
+      <span class="mono hz">{{ tickRate }}&#8202;Hz</span>
+      <span class="conn" [class.conn--off]="!connected()">
+        <span class="conn-dot"></span>{{ connected() ? 'Connected' : 'Disconnected' }}
+      </span>
+    </div>
+  </header>
+
+  <!-- Body: world + stats rail -->
+  <div class="body">
+    <section class="world">
+      <div class="world-stage">
+        <app-world-canvas />
+
+        <!-- Legend -->
+        <div class="legend">
+          <span><i class="sw sw-bee"></i>Bee</span>
+          <span><i class="sw sw-nectar"></i>Nectar</span>
+          <span><i class="sw sw-hive"></i>Hive</span>
+          <span><i class="sw sw-queen"></i>Queen</span>
+        </div>
+
+        <!-- Control dock -->
+        <div class="dock">
+          <button
+            type="button"
+            class="btn btn--primary"
+            (click)="start()"
+            [disabled]="running()"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M2.5 1.5 10.5 6 2.5 10.5Z" fill="currentColor" />
+            </svg>
+            Start
+          </button>
+          <button
+            type="button"
+            class="btn btn--secondary"
+            (click)="pause()"
+            [disabled]="!running()"
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <rect x="2.6" y="1.6" width="2.6" height="8.8" rx="1" fill="currentColor" />
+              <rect x="6.8" y="1.6" width="2.6" height="8.8" rx="1" fill="currentColor" />
+            </svg>
+            Pause
+          </button>
+          <button type="button" class="btn btn--ghost" (click)="reset()">
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M12 7a5 5 0 1 1-1.4-3.5" />
+              <path d="M12.2 1.6 12.2 4.2 9.6 4.2" />
+            </svg>
+            Reset
+          </button>
+
+          <span class="dock-divider"></span>
+
+          <div class="speed" role="group" aria-label="Simulation speed">
+            @for (s of speeds; track s) {
+              <button
+                type="button"
+                class="speed-seg"
+                [class.active]="speed() === s"
+                (click)="setSpeed(s)"
+              >
+                {{ s }}&#215;
+              </button>
+            }
+          </div>
+
+          <span class="dock-divider"></span>
+
+          <div class="zoom">
+            <button type="button" class="zoom-btn" (click)="zoomOut()" aria-label="Zoom out">&#8722;</button>
+            <span class="mono zoom-readout">{{ zoomPercent() }}%</span>
+            <button type="button" class="zoom-btn" (click)="zoomIn()" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stats rail -->
+    <aside class="rail">
+      <!-- Population -->
+      <div class="card">
+        <div class="eyebrow">
+          <svg width="18" height="20" viewBox="0 0 22 24" aria-hidden="true">
+            <path d="M11 1.5 20.5 7 20.5 17 11 22.5 1.5 17 1.5 7Z" fill="#F3D08A" stroke="#D9A93F" stroke-width="1.2" />
+          </svg>
+          <span class="eyebrow-label">Population</span>
+        </div>
+        <div class="stat">
+          <span class="mono stat-num">{{ population() }}</span>
+          <span class="stat-cap">active bees</span>
+        </div>
+        <div class="chips">
+          <span class="chip"><i class="sw sw-queen"></i>1 Queen</span>
+          <span class="chip">1 Hive</span>
+        </div>
+      </div>
+
+      <!-- Colony Energy -->
+      <div class="card">
+        <div class="card-head">
+          <span class="eyebrow-label">Colony Energy</span>
+          <span class="mono card-value">{{ colonyEnergy() }}%</span>
+        </div>
+        <div class="bar bar--lg">
+          <div class="bar-fill bar-fill--energy" [style.width.%]="colonyEnergy()"></div>
+        </div>
+        <span class="stat-cap">avg per bee &middot; drains with activity, refills resting</span>
+      </div>
+
+      <!-- Behavior -->
+      <div class="card">
+        <div class="card-head">
+          <span class="eyebrow-label">Behavior</span>
+          <span class="live"><i></i>LIVE</span>
+        </div>
+        <div class="behavior">
+          @for (row of behavior(); track row.state) {
+            <div class="behavior-row">
+              <div class="behavior-top">
+                <i class="dot" [class]="'dot--' + row.state"></i>
+                <span class="behavior-label">{{ row.label }}</span>
+                <span class="mono behavior-count">{{ row.count }}</span>
+              </div>
+              <div class="bar">
+                <div
+                  class="bar-fill"
+                  [class]="'bar-fill--' + row.state"
+                  [style.width.%]="row.fraction * 100"
+                ></div>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- Resources -->
+      <div class="card">
+        <span class="eyebrow-label">Resources</span>
+        <div class="resources">
+          <div class="resource-col">
+            <span class="mono resource-num">{{ nectarCount() }}</span>
+            <span class="stat-cap">Nectar sources</span>
+          </div>
+          <span class="resource-divider"></span>
+          <div class="resource-col">
+            <div class="card-head">
+              <span class="behavior-label">Honey stored</span>
+              <span class="mono card-value card-value--sm">{{ honeyStored() }}%</span>
+            </div>
+            <div class="bar bar--md">
+              <div class="bar-fill bar-fill--honey" [style.width.%]="honeyStored()"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
 </main>
