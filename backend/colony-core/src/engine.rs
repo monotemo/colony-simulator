@@ -81,6 +81,23 @@ mod tests {
     }
 
     #[test]
+    fn stepping_from_the_seed_is_deterministic() {
+        // The engine has no RNG, so two runs from the same seed must produce
+        // bit-identical trajectories. This is the contract that collision
+        // avoidance (which reads neighbours and sums forces) must not break —
+        // re-run it after any change to `World::step`.
+        fn run(steps: u64) -> WorldSnapshot {
+            let mut engine = Engine::seeded();
+            for _ in 0..steps {
+                engine.step(1.0 / 30.0);
+            }
+            engine.snapshot()
+        }
+
+        assert_eq!(run(600), run(600));
+    }
+
+    #[test]
     fn snapshot_round_trips_through_json() {
         let engine = Engine::seeded();
         let snap = engine.snapshot();

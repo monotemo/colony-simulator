@@ -84,17 +84,25 @@ impl World {
         id
     }
 
-    /// Build a seeded starting world: a clutch of bees with deterministic,
+    /// Build the default seeded starting world: 24 bees with deterministic,
     /// varied velocities plus a few nectar sources. Deterministic so the
     /// initial state is reproducible without pulling in an RNG dependency.
     pub fn seeded() -> Self {
+        Self::seeded_with_count(24)
+    }
+
+    /// Build a seeded world with `bee_count` bees. The placement and velocity
+    /// math is parameterized on `t = i / bee_count`, so the layout shape is
+    /// the same at any population — at `bee_count == 24` it is byte-identical
+    /// to [`World::seeded`]. Exists so benchmarks and scale tests can stress
+    /// arbitrary populations without an RNG; production still uses `seeded()`.
+    pub fn seeded_with_count(bee_count: usize) -> Self {
         // Depth is sized for the eventual flight volume; bees and resources are
         // seeded flat at z = 0 until flight behavior lands, so visuals are
         // unchanged while the third axis exists for real in the geometry.
         let bounds = Bounds::new(800.0, 600.0, 400.0);
         let mut world = World::empty(bounds);
 
-        let bee_count = 24;
         for i in 0..bee_count {
             let t = i as f64 / bee_count as f64;
             // Spread starting positions across the interior, on the z = 0 plane.
@@ -145,6 +153,18 @@ mod tests {
         let r = world.add_resource(Vec3::ZERO, ResourceKind::Nectar);
         assert_ne!(a, b);
         assert_ne!(b, r);
+    }
+
+    #[test]
+    fn seeded_matches_seeded_with_count_24() {
+        // `seeded()` must stay byte-identical to the parameterized builder at
+        // its production population, so adding the benchmarking hook can't
+        // silently perturb the default world.
+        let default = World::seeded();
+        let explicit = World::seeded_with_count(24);
+        assert_eq!(default.bees, explicit.bees);
+        assert_eq!(default.resources, explicit.resources);
+        assert_eq!(default.bounds, explicit.bounds);
     }
 
     #[test]
