@@ -26,6 +26,7 @@ export type BeeState = 'wandering';
 export interface BeeSnapshot {
   id: number;
   position: Vec3;
+  velocity: Vec3;
   state: BeeState;
 }
 
