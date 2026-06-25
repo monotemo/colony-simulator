@@ -32,11 +32,13 @@
     "@angular/router": "^20.3.0",
     "@angular/service-worker": "^20.3.0",
     "rxjs": "~7.8.0",
+    "three": "^0.184.0",
     "tslib": "^2.3.0",
     "zone.js": "~0.15.0"
   },
   "devDependencies": {
     "@angular/build": "^20.3.30",
+    "@types/three": "^0.184.0",
     "@angular/cli": "^20.3.30",
     "@angular/compiler-cli": "^20.3.0",
     "@types/jasmine": "~5.1.0",
