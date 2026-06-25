@@ -1,6 +1,7 @@
 //! The world: physical bounds, resources, and the entities living inside it.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,11 @@ pub struct World {
     pub bees: Vec<Bee>,
     pub resources: Vec<Resource>,
     ids: IdAllocator,
+    /// Reusable scratch for the per-tick separation broad phase. Holds no
+    /// simulation state — it is cleared and rebuilt every [`World::step`] — so
+    /// it never participates in equality or determinism, only in keeping the
+    /// hot path allocation-free.
+    grid: SpatialGrid,
 }
 
 impl World {
@@ -82,6 +88,7 @@ impl World {
             bees: Vec::new(),
             resources: Vec::new(),
             ids: IdAllocator::new(),
+            grid: SpatialGrid::default(),
         }
     }
 
@@ -152,7 +159,7 @@ impl World {
     /// Runs in two strict passes so the result is independent of iteration
     /// order and therefore deterministic:
     /// 1. Read every bee's position and compute each one's separation
-    ///    acceleration (read-only — see [`World::separation_accelerations`]).
+    ///    acceleration (read-only — see [`SpatialGrid::separation_accelerations`]).
     /// 2. Fold that acceleration into velocity, clamp to `MAX_SPEED`, then let
     ///    each bee integrate and bounce off the walls as before.
     ///
@@ -160,8 +167,11 @@ impl World {
     /// authority that confines a bee to the world, so avoidance can never eject
     /// one through a wall.
     pub fn step(&mut self, dt: f64) {
-        let accelerations = self.separation_accelerations();
-        for (bee, accel) in self.bees.iter_mut().zip(&accelerations) {
+        // Disjoint borrows: the grid fills its own buffer from `&self.bees`,
+        // then the integration loop mutates `self.bees` while reading the
+        // returned slice and `self.bounds`.
+        let accelerations = self.grid.separation_accelerations(&self.bees);
+        for (bee, accel) in self.bees.iter_mut().zip(accelerations) {
             let mut velocity = bee.velocity.add(accel.scale(dt));
             let speed_squared = velocity.length_squared();
             if speed_squared > MAX_SPEED * MAX_SPEED {
@@ -172,82 +182,12 @@ impl World {
         }
     }
 
-    /// Compute the separation (collision-avoidance) acceleration for every bee,
-    /// returned in bee order. Pure and read-only: it touches no mutable state,
-    /// which is what lets [`World::step`] apply the whole batch atomically.
-    ///
-    /// Each pair of bees closer than `SEPARATION_RADIUS` contributes an
-    /// equal-and-opposite push along the line between them (see
-    /// [`World::separation_push`]). Bees with no close neighbour accumulate
-    /// [`Vec3::ZERO`].
-    ///
-    /// Broad phase is a uniform grid with cell size `SEPARATION_RADIUS`: each bee
-    /// is bucketed by its cell, and only the 3×3×3 block of cells around it can
-    /// hold a bee within range, so we never test the far-field pairs that dominate
-    /// the O(n²) cost. Within each bee we gather candidate neighbours and process
-    /// them in ascending index order, which reproduces the naive all-pairs
-    /// summation order exactly — the `grid_matches_naive` test guards that
-    /// equivalence. The grid is read only via fixed-key lookups, so `HashMap`'s
-    /// arbitrary iteration order never leaks into the result and determinism holds.
-    ///
-    /// The grid is used at every population. Below ~1k bees a plain all-pairs scan
-    /// is actually faster in absolute terms, but only by hundreds of nanoseconds
-    /// against a 33ms frame budget — far below anything we'd feel — so we keep one
-    /// strategy rather than branch on size. The all-pairs scan survives as the
-    /// test-only correctness oracle.
-    fn separation_accelerations(&self) -> Vec<Vec3> {
-        let n = self.bees.len();
-        let mut accelerations = vec![Vec3::ZERO; n];
-
-        // Bucket bee indices by grid cell. Indices are inserted in ascending
-        // order, so each bucket stays sorted for free.
-        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
-        for i in 0..n {
-            grid.entry(cell_of(self.bees[i].position)).or_default().push(i);
-        }
-
-        let mut candidates: Vec<usize> = Vec::new();
-        for i in 0..n {
-            let (cx, cy, cz) = cell_of(self.bees[i].position);
-            candidates.clear();
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
-                            candidates.extend(bucket.iter().copied().filter(|&j| j > i));
-                        }
-                    }
-                }
-            }
-            // Ascending `j` so the running sums into `accelerations[i]` and the
-            // matching subtractions into `accelerations[j]` land in the same
-            // order as the naive reference, keeping the totals bit-identical.
-            candidates.sort_unstable();
-            for &j in &candidates {
-                if let Some(push) = self.separation_push(i, j) {
-                    accelerations[i] = accelerations[i].add(push);
-                    accelerations[j] = accelerations[j].sub(push);
-                }
-            }
-        }
-
-        accelerations
-    }
-
-    /// The push that bee `i` feels away from bee `j` (bee `j` feels its
-    /// negation). `None` when the pair is out of range, or coincident — a
-    /// zero-length offset has no direction to push along, so such bees stay put
-    /// until something else nudges them apart. The magnitude ramps linearly
-    /// from zero at `SEPARATION_RADIUS` to `SEPARATION_STRENGTH` at full overlap.
-    fn separation_push(&self, i: usize, j: usize) -> Option<Vec3> {
-        let offset = self.bees[i].position.sub(self.bees[j].position);
-        let distance_squared = offset.length_squared();
-        if distance_squared >= SEPARATION_RADIUS * SEPARATION_RADIUS || distance_squared == 0.0 {
-            return None;
-        }
-        let distance = distance_squared.sqrt();
-        let closeness = (SEPARATION_RADIUS - distance) / SEPARATION_RADIUS;
-        Some(offset.scale(SEPARATION_STRENGTH * closeness / distance))
+    /// Separation accelerations for every bee, in bee order — a test-facing
+    /// wrapper over [`SpatialGrid::separation_accelerations`] that hands back an
+    /// owned copy so the borrow on the grid is released immediately.
+    #[cfg(test)]
+    fn separation_accelerations(&mut self) -> Vec<Vec3> {
+        self.grid.separation_accelerations(&self.bees).to_vec()
     }
 
     /// Naive O(n²) all-pairs separation: the readable reference the grid is
@@ -258,13 +198,143 @@ impl World {
         let mut accelerations = vec![Vec3::ZERO; self.bees.len()];
         for i in 0..self.bees.len() {
             for j in (i + 1)..self.bees.len() {
-                if let Some(push) = self.separation_push(i, j) {
+                if let Some(push) =
+                    separation_push(self.bees[i].position, self.bees[j].position)
+                {
                     accelerations[i] = accelerations[i].add(push);
                     accelerations[j] = accelerations[j].sub(push);
                 }
             }
         }
         accelerations
+    }
+}
+
+/// Reusable scratch for the separation broad phase. Lives on the [`World`] so
+/// the per-tick grid build allocates once and then reuses its buffers across
+/// ticks instead of churning the heap 30 times a second. Carries no simulation
+/// state: every buffer is cleared and rebuilt at the start of each call.
+#[derive(Debug, Clone, Default)]
+struct SpatialGrid {
+    /// Bee indices bucketed by cell, hashed with the cheap deterministic
+    /// [`CellHasher`] rather than SipHash. Cleared each tick — which keeps the
+    /// table's capacity so the table itself is not reallocated — then rebuilt
+    /// from the live positions.
+    buckets: CellMap,
+    /// Neighbour candidates for the bee currently being processed.
+    candidates: Vec<usize>,
+    /// Output accelerations, one per bee, in bee order.
+    accelerations: Vec<Vec3>,
+}
+
+impl SpatialGrid {
+    /// Compute the separation (collision-avoidance) acceleration for every bee
+    /// into the reusable `accelerations` buffer and return it.
+    ///
+    /// Each pair of bees closer than `SEPARATION_RADIUS` contributes an
+    /// equal-and-opposite push along the line between them (see
+    /// [`separation_push`]). Bees with no close neighbour stay at [`Vec3::ZERO`].
+    ///
+    /// Broad phase is a uniform grid with cell size `SEPARATION_RADIUS`: each bee
+    /// is bucketed by its cell, and only the 3×3×3 block of cells around it can
+    /// hold a bee within range, so we never test the far-field pairs that dominate
+    /// the O(n²) cost. Within each bee we gather candidate neighbours and process
+    /// them in ascending index order, which reproduces the naive all-pairs
+    /// summation order exactly — the `grid_matches_naive` test guards that
+    /// equivalence. The grid is read only via fixed-key lookups, so the hash's
+    /// bucket layout never affects the result: determinism holds.
+    ///
+    /// The grid is used at every population. Below ~1k bees a plain all-pairs scan
+    /// is actually faster in absolute terms, but only by hundreds of nanoseconds
+    /// against a 33ms frame budget — far below anything we'd feel — so we keep one
+    /// strategy rather than branch on size. The all-pairs scan survives as the
+    /// test-only correctness oracle.
+    fn separation_accelerations(&mut self, bees: &[Bee]) -> &[Vec3] {
+        let n = bees.len();
+        // clear() + resize() (not resize() alone) so every slot is reset to
+        // ZERO; a bare resize would leave last tick's values in slots [0, n).
+        self.accelerations.clear();
+        self.accelerations.resize(n, Vec3::ZERO);
+
+        // Drop last tick's entries (retaining table capacity), then re-bucket
+        // every bee. Indices are pushed in ascending order, so each bucket stays
+        // sorted for free.
+        self.buckets.clear();
+        for (i, bee) in bees.iter().enumerate() {
+            self.buckets.entry(cell_of(bee.position)).or_default().push(i);
+        }
+
+        for i in 0..n {
+            let (cx, cy, cz) = cell_of(bees[i].position);
+            self.candidates.clear();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(bucket) = self.buckets.get(&(cx + dx, cy + dy, cz + dz)) {
+                            self.candidates
+                                .extend(bucket.iter().copied().filter(|&j| j > i));
+                        }
+                    }
+                }
+            }
+            // Ascending `j` so the running sums into `accelerations[i]` and the
+            // matching subtractions into `accelerations[j]` land in the same
+            // order as the naive reference, keeping the totals bit-identical.
+            self.candidates.sort_unstable();
+            for &j in &self.candidates {
+                if let Some(push) = separation_push(bees[i].position, bees[j].position) {
+                    self.accelerations[i] = self.accelerations[i].add(push);
+                    self.accelerations[j] = self.accelerations[j].sub(push);
+                }
+            }
+        }
+
+        &self.accelerations
+    }
+}
+
+/// The push that the bee at `a` feels away from the bee at `b` (the bee at `b`
+/// feels its negation). `None` when the pair is out of range, or coincident — a
+/// zero-length offset has no direction to push along, so such bees stay put
+/// until something else nudges them apart. The magnitude ramps linearly from
+/// zero at `SEPARATION_RADIUS` to `SEPARATION_STRENGTH` at full overlap.
+fn separation_push(a: Vec3, b: Vec3) -> Option<Vec3> {
+    let offset = a.sub(b);
+    let distance_squared = offset.length_squared();
+    if distance_squared >= SEPARATION_RADIUS * SEPARATION_RADIUS || distance_squared == 0.0 {
+        return None;
+    }
+    let distance = distance_squared.sqrt();
+    let closeness = (SEPARATION_RADIUS - distance) / SEPARATION_RADIUS;
+    Some(offset.scale(SEPARATION_STRENGTH * closeness / distance))
+}
+
+/// A grid keyed by integer cell coordinates, hashed with [`CellHasher`].
+type CellMap = HashMap<(i64, i64, i64), Vec<usize>, BuildHasherDefault<CellHasher>>;
+
+/// A tiny deterministic hasher for integer grid-cell keys. SipHash (the standard
+/// library default) is robust against adversarial keys but, at tens of thousands
+/// of cell lookups per tick, is the dominant cost of the broad phase. Cell keys
+/// are trusted internal integers, so we mix the three coordinates with a
+/// multiply-rotate instead — far cheaper, and with no random seed it keeps cell
+/// hashing deterministic across runs.
+#[derive(Default)]
+struct CellHasher(u64);
+
+impl Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback path; the cell key only ever hashes via `write_i64`.
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.0 = (self.0.rotate_left(13) ^ value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
 }
 
