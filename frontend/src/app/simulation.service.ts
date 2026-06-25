@@ -32,9 +32,10 @@ export abstract class SimulationService {
   abstract reset(): void;
 
   /**
-   * Set the tick-rate multiplier (e.g. `0.5`, `1`, `2`). Sources that cannot
-   * vary their rate (the fixed-rate server stream) may ignore this; the
-   * in-browser wasm engine honours it. Defaults to a no-op.
+   * Set the tick-rate multiplier (e.g. `0.5`, `1`, `2`). Both transports honour
+   * it: the wasm engine re-arms its in-browser stepping loop, and the server
+   * stream forwards it so the simulation task re-arms its tick interval.
+   * Defaults to a no-op so a source can still opt out.
    */
   setSpeed(_multiplier: number): void {}
 }
