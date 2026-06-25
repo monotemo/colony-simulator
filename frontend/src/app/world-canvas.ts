@@ -11,12 +11,13 @@ import {
 } from '@angular/core';
 import * as THREE from 'three';
 import { SimulationService } from './simulation.service';
-import { BeeState, WorldSnapshot } from './models';
+import { BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
 
 /**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
- * as small glowing dots tinted by behavior state, nectar resources as
- * terracotta discs, and a central hive with its queen just above it.
+ * as small striped, winged shapes tinted by behavior state and turned to face
+ * their heading, nectar resources as terracotta discs, and a central hive with
+ * its queen just above it.
  *
  * The view is a top-down orthographic camera looking straight down the world's
  * `z` (flight) axis, so the screen shows the x/y plane. World `y` grows downward
@@ -63,15 +64,37 @@ export class WorldCanvas implements OnDestroy {
   private resizeObserver?: ResizeObserver;
   private readonly onWheel = (event: WheelEvent) => this.handleWheel(event);
 
-  // Shared geometry/materials — one of each, reused across every entity.
-  private readonly beeGeometry = new THREE.SphereGeometry(7, 16, 16);
-  // Bee body tinted by behavior state (wandering gold / foraging sage / resting
-  // dim). The emissive lift gives the "glow" the design calls for.
+  // Shared geometry/materials — one of each, reused across every entity. A bee
+  // is composed from a handful of flat shapes laid out in the x/y plane: an
+  // elongated body pointing along +x (its heading), a dark head at the tip,
+  // dark abdomen stripes, and a pair of translucent wings. Every bee `Group`
+  // reuses these singletons; only the lightweight `Group`/child meshes are
+  // per-entity (see {@link createBee}).
+  private readonly beeBodyGeometry = new THREE.ShapeGeometry(this.ellipse(8, 5), 24);
+  private readonly beeStripeGeometry = new THREE.ShapeGeometry(this.ellipse(1.1, 4.6), 16);
+  private readonly beeWingGeometry = new THREE.ShapeGeometry(this.ellipse(3.6, 6), 20);
+  private readonly beeHeadGeometry = new THREE.CircleGeometry(3, 16);
+  // Body tinted by behavior state (wandering gold / foraging sage / resting
+  // dim); the emissive lift gives the soft "glow" the design calls for.
   private readonly beeMaterials: Record<BeeState, THREE.MeshStandardMaterial> = {
     wandering: this.glowMaterial(0xe2a12b, 0xf3b84a, 0.45),
     foraging: this.glowMaterial(0x7c8b5a, 0x9aae6e, 0.35),
     resting: this.glowMaterial(0xc99a38, 0xc99a38, 0.12),
   };
+  // Near-black bands for the head and abdomen stripes — the bee's contrast.
+  private readonly beeMarkingMaterial = this.glowMaterial(0x2a1c08, 0x3a2a10, 0.1);
+  // Gauzy wings: translucent and depth-write off so they blend over the body
+  // (and each other) without occluding it.
+  private readonly beeWingMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: 0xfff4dd,
+    emissiveIntensity: 0.25,
+    transparent: true,
+    opacity: 0.4,
+    roughness: 0.3,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
   private readonly flowerGeometry = new THREE.CircleGeometry(9, 24);
   private readonly flowerMaterial = this.glowMaterial(0xc9663c, 0xe68a5e, 0.25);
 
@@ -83,9 +106,12 @@ export class WorldCanvas implements OnDestroy {
   private hive?: THREE.Mesh;
   private queen?: THREE.Mesh;
 
-  // Live meshes keyed by stable entity id, reconciled each snapshot.
-  private readonly beeMeshes = new Map<number, THREE.Mesh>();
-  private readonly flowerMeshes = new Map<number, THREE.Mesh>();
+  // Live scene objects keyed by stable entity id, reconciled each snapshot via
+  // the shared {@link reconcileEntities} skeleton. Bees are multi-part `Group`s
+  // (body + markings + wings); flowers are single meshes — both are just
+  // `Object3D`s to the reconciler, so new entity kinds drop in the same way.
+  private readonly beeObjects = new Map<number, THREE.Object3D>();
+  private readonly flowerObjects = new Map<number, THREE.Object3D>();
 
   /** World bounds the camera/landmarks are currently sized for. */
   private worldWidth = 0;
@@ -109,6 +135,13 @@ export class WorldCanvas implements OnDestroy {
         this.renderSnapshot(snapshot);
       }
     });
+  }
+
+  /** A flat ellipse `Shape` centred at the origin, for the bee's body parts. */
+  private ellipse(rx: number, ry: number): THREE.Shape {
+    const shape = new THREE.Shape();
+    shape.absellipse(0, 0, rx, ry, 0, Math.PI * 2, false, 0);
+    return shape;
   }
 
   /** A warm body colour with an emissive lift, for the soft dot "glow". */
@@ -202,52 +235,127 @@ export class WorldCanvas implements OnDestroy {
       this.updateCamera();
     }
 
-    this.reconcile(this.beeMeshes, this.beeGeometry, snapshot.bees, (bee) =>
-      this.beeMaterials[bee.state] ?? this.beeMaterials.wandering,
+    this.reconcileEntities(
+      this.beeObjects,
+      snapshot.bees,
+      (bee) => this.createBee(this.beeMaterialFor(bee)),
+      (object, bee) => this.updateBee(object as THREE.Group, bee),
     );
-    this.reconcile(
-      this.flowerMeshes,
-      this.flowerGeometry,
+    this.reconcileEntities(
+      this.flowerObjects,
       snapshot.resources,
-      () => this.flowerMaterial,
+      () => new THREE.Mesh(this.flowerGeometry, this.flowerMaterial),
+      (object, flower) => this.placeAt(object, flower.position),
     );
 
     renderer.render(scene, camera);
   }
 
   /**
-   * Create/update/remove meshes so the map mirrors `entities` exactly, keyed by
-   * stable id. World `y` is flipped (`height - y`) so the origin sits top-left
-   * on screen. `material` resolves per entity so bees can be tinted by state.
+   * The shared reconcile skeleton: make `objects` mirror `entities` exactly,
+   * keyed by stable id. New entities are built with `create` and added to the
+   * scene; every surviving entity is refreshed with `update`; objects whose
+   * entity vanished from the snapshot are removed. Each entity kind supplies its
+   * own `create`/`update` (a single mesh, a composite `Group`, …), so adding a
+   * kind is one more call — no new bespoke loop.
    */
-  private reconcile<T extends { id: number; position: { x: number; y: number; z: number } }>(
-    meshes: Map<number, THREE.Mesh>,
-    geometry: THREE.BufferGeometry,
+  private reconcileEntities<T extends { id: number }>(
+    objects: Map<number, THREE.Object3D>,
     entities: ReadonlyArray<T>,
-    material: (entity: T) => THREE.Material,
+    create: (entity: T) => THREE.Object3D,
+    update: (object: THREE.Object3D, entity: T) => void,
   ): void {
     const seen = new Set<number>();
     for (const entity of entities) {
       seen.add(entity.id);
-      let mesh = meshes.get(entity.id);
-      if (!mesh) {
-        mesh = new THREE.Mesh(geometry, material(entity));
-        meshes.set(entity.id, mesh);
-        this.scene!.add(mesh);
-      } else {
-        mesh.material = material(entity);
+      let object = objects.get(entity.id);
+      if (!object) {
+        object = create(entity);
+        objects.set(entity.id, object);
+        this.scene!.add(object);
       }
-      const { x, y, z } = entity.position;
-      mesh.position.set(x, this.worldHeight - y, z);
+      update(object, entity);
     }
 
-    // Drop meshes whose entity disappeared from the snapshot.
-    for (const [id, mesh] of meshes) {
+    // Drop objects whose entity disappeared from the snapshot.
+    for (const [id, object] of objects) {
       if (!seen.has(id)) {
-        this.scene!.remove(mesh);
-        meshes.delete(id);
+        this.scene!.remove(object);
+        objects.delete(id);
       }
     }
+  }
+
+  /**
+   * Position an object on the x/y plane, flipping world `y` (`height - y`) so
+   * the world origin sits top-left on screen. Shared by every entity kind.
+   */
+  private placeAt(object: THREE.Object3D, position: Vec3): void {
+    object.position.set(position.x, this.worldHeight - position.y, position.z);
+  }
+
+  /** The body material for a bee's current behavior state (gold/sage/dim). */
+  private beeMaterialFor(bee: BeeSnapshot): THREE.Material {
+    return this.beeMaterials[bee.state] ?? this.beeMaterials.wandering;
+  }
+
+  /**
+   * Refresh a live bee: recolour the body by state, place it (world-`y` flip),
+   * and turn it to face its velocity. On screen `y` is flipped, so the heading
+   * angle negates `vy`; a near-stationary bee keeps its previous facing.
+   */
+  private updateBee(group: THREE.Group, bee: BeeSnapshot): void {
+    (group.userData['body'] as THREE.Mesh).material = this.beeMaterialFor(bee);
+    this.placeAt(group, bee.position);
+
+    const vx = bee.velocity?.x ?? 0;
+    const vy = bee.velocity?.y ?? 0;
+    if (vx * vx + vy * vy > 1e-6) {
+      group.rotation.z = Math.atan2(-vy, vx);
+    }
+  }
+
+  /**
+   * Assemble one bee from the shared part geometries: an elongated body (the
+   * state-tinted glow), a dark head at the heading tip (`+x`), two abdomen
+   * stripes tapering toward the tail, and a translucent wing on each side. The
+   * `body` mesh is stashed in `userData` so {@link updateBee} can recolour it by
+   * state without rebuilding the group. The bee is modelled pointing along `+x`
+   * and rotated about `z` to face its velocity (see {@link updateBee}).
+   */
+  private createBee(material: THREE.Material): THREE.Group {
+    const bee = new THREE.Group();
+
+    const body = new THREE.Mesh(this.beeBodyGeometry, material);
+    bee.add(body);
+    bee.userData['body'] = body;
+
+    // Dark head poking out past the front of the body.
+    const head = new THREE.Mesh(this.beeHeadGeometry, this.beeMarkingMaterial);
+    head.position.set(7.5, 0, 0.05);
+    bee.add(head);
+
+    // Two abdomen stripes on the rear half, narrowed to follow the body taper
+    // so they stay inside the silhouette. Lifted slightly in z to sit on top.
+    for (const [x, widthScale] of [
+      [-1, 1],
+      [-4.5, 0.78],
+    ] as const) {
+      const stripe = new THREE.Mesh(this.beeStripeGeometry, this.beeMarkingMaterial);
+      stripe.position.set(x, 0, 0.05);
+      stripe.scale.set(1, widthScale, 1);
+      bee.add(stripe);
+    }
+
+    // A wing on each flank, fanned slightly back and floated above the body.
+    for (const side of [1, -1]) {
+      const wing = new THREE.Mesh(this.beeWingGeometry, this.beeWingMaterial);
+      wing.position.set(2, side * 4.5, 0.3);
+      wing.rotation.z = side * 0.35;
+      bee.add(wing);
+    }
+
+    return bee;
   }
 
   /**
@@ -345,10 +453,15 @@ export class WorldCanvas implements OnDestroy {
     canvas.removeEventListener('wheel', this.onWheel);
     this.resizeObserver?.disconnect();
 
-    this.beeGeometry.dispose();
+    this.beeBodyGeometry.dispose();
+    this.beeStripeGeometry.dispose();
+    this.beeWingGeometry.dispose();
+    this.beeHeadGeometry.dispose();
     for (const material of Object.values(this.beeMaterials)) {
       material.dispose();
     }
+    this.beeMarkingMaterial.dispose();
+    this.beeWingMaterial.dispose();
     this.flowerGeometry.dispose();
     this.flowerMaterial.dispose();
     this.hiveGeometry.dispose();

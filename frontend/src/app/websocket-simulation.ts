@@ -44,6 +44,14 @@ export class WebSocketSimulationService extends SimulationService {
     void this.control('reset');
   }
 
+  override setSpeed(multiplier: number): void {
+    // The server owns the tick rate, so forward the multiplier and let the
+    // simulation task re-arm its interval (see `colony_server::sim`).
+    if (multiplier > 0) {
+      void this.control({ set_speed: multiplier });
+    }
+  }
+
   private async control(command: ControlCommand): Promise<void> {
     await fetch('/api/control', {
       method: 'POST',

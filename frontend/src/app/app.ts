@@ -48,8 +48,10 @@ export class App {
   readonly connected = this.sim.connected;
   private readonly snapshot = this.sim.snapshot;
 
-  /** Fixed engine tick rate, in Hz (both transports run at 30 Hz). */
-  readonly tickRate = 30;
+  /** Base engine tick rate, in Hz (both transports step at 30 Hz at 1× speed). */
+  private readonly baseTickRate = 30;
+  /** Effective tick rate shown in the header, scaled by the active speed. */
+  readonly tickRate = computed(() => this.baseTickRate * this.speed());
 
   readonly tick = computed(() => this.snapshot()?.tick ?? 0);
   readonly population = computed(() => this.snapshot()?.bees.length ?? 0);

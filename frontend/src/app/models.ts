@@ -62,5 +62,9 @@ export interface WorldSnapshot {
   honeyStored?: number;
 }
 
-/** Control commands accepted by `POST /api/control`. */
-export type ControlCommand = 'start' | 'pause' | 'reset';
+/**
+ * Control commands accepted by `POST /api/control`, mirroring
+ * `colony_server::sim::Command` (serde externally tagged): the simple commands
+ * are bare strings, while `set_speed` carries its tick-rate multiplier.
+ */
+export type ControlCommand = 'start' | 'pause' | 'reset' | { set_speed: number };

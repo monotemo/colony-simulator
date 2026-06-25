@@ -30,8 +30,10 @@ frontend/                Angular 20 app (standalone components, signals)
   reset / setSpeed). `app.config.ts` picks the implementation at build time via
   `environment.useWasm`: WebSocket in dev, WASM in production. When you add a
   capability, add it to the abstract class and implement it in **both**
-  services; the server's fixed-rate stream may legitimately no-op things the
-  wasm engine honours (e.g. `setSpeed`).
+  services. A transport may legitimately no-op a capability it can't express
+  (the abstract `setSpeed` defaults to a no-op for that reason), though both
+  transports do honour speed today — wasm re-arms its stepping loop and the
+  server forwards a `set_speed` control command to its tick loop.
 - **The wire format is a contract.** `frontend/src/app/models.ts` is a
   hand-maintained mirror of `backend/colony-core/src/snapshot.rs` (serde
   `snake_case`). Change one, change the other. Fields the engine doesn't emit
