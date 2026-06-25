@@ -11,7 +11,7 @@ import {
 } from '@angular/core';
 import * as THREE from 'three';
 import { SimulationService } from './simulation.service';
-import { BeeState, WorldSnapshot } from './models';
+import { BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
 
 /**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
@@ -106,10 +106,12 @@ export class WorldCanvas implements OnDestroy {
   private hive?: THREE.Mesh;
   private queen?: THREE.Mesh;
 
-  // Live meshes keyed by stable entity id, reconciled each snapshot. Bees are
-  // multi-part `Group`s (body + markings + wings); flowers are single meshes.
-  private readonly beeMeshes = new Map<number, THREE.Group>();
-  private readonly flowerMeshes = new Map<number, THREE.Mesh>();
+  // Live scene objects keyed by stable entity id, reconciled each snapshot via
+  // the shared {@link reconcileEntities} skeleton. Bees are multi-part `Group`s
+  // (body + markings + wings); flowers are single meshes — both are just
+  // `Object3D`s to the reconciler, so new entity kinds drop in the same way.
+  private readonly beeObjects = new Map<number, THREE.Object3D>();
+  private readonly flowerObjects = new Map<number, THREE.Object3D>();
 
   /** World bounds the camera/landmarks are currently sized for. */
   private worldWidth = 0;
@@ -233,49 +235,83 @@ export class WorldCanvas implements OnDestroy {
       this.updateCamera();
     }
 
-    this.reconcileBees(snapshot.bees);
-    this.reconcile(
-      this.flowerMeshes,
-      this.flowerGeometry,
+    this.reconcileEntities(
+      this.beeObjects,
+      snapshot.bees,
+      (bee) => this.createBee(this.beeMaterialFor(bee)),
+      (object, bee) => this.updateBee(object as THREE.Group, bee),
+    );
+    this.reconcileEntities(
+      this.flowerObjects,
       snapshot.resources,
-      () => this.flowerMaterial,
+      () => new THREE.Mesh(this.flowerGeometry, this.flowerMaterial),
+      (object, flower) => this.placeAt(object, flower.position),
     );
 
     renderer.render(scene, camera);
   }
 
   /**
-   * Create/update/remove meshes so the map mirrors `entities` exactly, keyed by
-   * stable id. World `y` is flipped (`height - y`) so the origin sits top-left
-   * on screen. `material` resolves per entity so bees can be tinted by state.
+   * The shared reconcile skeleton: make `objects` mirror `entities` exactly,
+   * keyed by stable id. New entities are built with `create` and added to the
+   * scene; every surviving entity is refreshed with `update`; objects whose
+   * entity vanished from the snapshot are removed. Each entity kind supplies its
+   * own `create`/`update` (a single mesh, a composite `Group`, …), so adding a
+   * kind is one more call — no new bespoke loop.
    */
-  private reconcile<T extends { id: number; position: { x: number; y: number; z: number } }>(
-    meshes: Map<number, THREE.Mesh>,
-    geometry: THREE.BufferGeometry,
+  private reconcileEntities<T extends { id: number }>(
+    objects: Map<number, THREE.Object3D>,
     entities: ReadonlyArray<T>,
-    material: (entity: T) => THREE.Material,
+    create: (entity: T) => THREE.Object3D,
+    update: (object: THREE.Object3D, entity: T) => void,
   ): void {
     const seen = new Set<number>();
     for (const entity of entities) {
       seen.add(entity.id);
-      let mesh = meshes.get(entity.id);
-      if (!mesh) {
-        mesh = new THREE.Mesh(geometry, material(entity));
-        meshes.set(entity.id, mesh);
-        this.scene!.add(mesh);
-      } else {
-        mesh.material = material(entity);
+      let object = objects.get(entity.id);
+      if (!object) {
+        object = create(entity);
+        objects.set(entity.id, object);
+        this.scene!.add(object);
       }
-      const { x, y, z } = entity.position;
-      mesh.position.set(x, this.worldHeight - y, z);
+      update(object, entity);
     }
 
-    // Drop meshes whose entity disappeared from the snapshot.
-    for (const [id, mesh] of meshes) {
+    // Drop objects whose entity disappeared from the snapshot.
+    for (const [id, object] of objects) {
       if (!seen.has(id)) {
-        this.scene!.remove(mesh);
-        meshes.delete(id);
+        this.scene!.remove(object);
+        objects.delete(id);
       }
+    }
+  }
+
+  /**
+   * Position an object on the x/y plane, flipping world `y` (`height - y`) so
+   * the world origin sits top-left on screen. Shared by every entity kind.
+   */
+  private placeAt(object: THREE.Object3D, position: Vec3): void {
+    object.position.set(position.x, this.worldHeight - position.y, position.z);
+  }
+
+  /** The body material for a bee's current behavior state (gold/sage/dim). */
+  private beeMaterialFor(bee: BeeSnapshot): THREE.Material {
+    return this.beeMaterials[bee.state] ?? this.beeMaterials.wandering;
+  }
+
+  /**
+   * Refresh a live bee: recolour the body by state, place it (world-`y` flip),
+   * and turn it to face its velocity. On screen `y` is flipped, so the heading
+   * angle negates `vy`; a near-stationary bee keeps its previous facing.
+   */
+  private updateBee(group: THREE.Group, bee: BeeSnapshot): void {
+    (group.userData['body'] as THREE.Mesh).material = this.beeMaterialFor(bee);
+    this.placeAt(group, bee.position);
+
+    const vx = bee.velocity?.x ?? 0;
+    const vy = bee.velocity?.y ?? 0;
+    if (vx * vx + vy * vy > 1e-6) {
+      group.rotation.z = Math.atan2(-vy, vx);
     }
   }
 
@@ -283,9 +319,9 @@ export class WorldCanvas implements OnDestroy {
    * Assemble one bee from the shared part geometries: an elongated body (the
    * state-tinted glow), a dark head at the heading tip (`+x`), two abdomen
    * stripes tapering toward the tail, and a translucent wing on each side. The
-   * `body` mesh is stashed in `userData` so reconciliation can recolour it by
+   * `body` mesh is stashed in `userData` so {@link updateBee} can recolour it by
    * state without rebuilding the group. The bee is modelled pointing along `+x`
-   * and rotated about `z` to face its velocity (see {@link reconcileBees}).
+   * and rotated about `z` to face its velocity (see {@link updateBee}).
    */
   private createBee(material: THREE.Material): THREE.Group {
     const bee = new THREE.Group();
@@ -320,45 +356,6 @@ export class WorldCanvas implements OnDestroy {
     }
 
     return bee;
-  }
-
-  /**
-   * Reconcile bee `Group`s against the snapshot, keyed by stable id (mirrors the
-   * generic {@link reconcile}, but bees are composite groups rather than single
-   * meshes). Each bee is positioned with the world-`y` flip and rotated about
-   * `z` to face its velocity — on screen `y` is flipped, so the heading angle
-   * negates `vy`. A near-stationary bee keeps its previous facing.
-   */
-  private reconcileBees(bees: WorldSnapshot['bees']): void {
-    const seen = new Set<number>();
-    for (const bee of bees) {
-      seen.add(bee.id);
-      const material = this.beeMaterials[bee.state] ?? this.beeMaterials.wandering;
-      let group = this.beeMeshes.get(bee.id);
-      if (!group) {
-        group = this.createBee(material);
-        this.beeMeshes.set(bee.id, group);
-        this.scene!.add(group);
-      } else {
-        (group.userData['body'] as THREE.Mesh).material = material;
-      }
-
-      const { x, y, z } = bee.position;
-      group.position.set(x, this.worldHeight - y, z);
-
-      const vx = bee.velocity?.x ?? 0;
-      const vy = bee.velocity?.y ?? 0;
-      if (vx * vx + vy * vy > 1e-6) {
-        group.rotation.z = Math.atan2(-vy, vx);
-      }
-    }
-
-    for (const [id, group] of this.beeMeshes) {
-      if (!seen.has(id)) {
-        this.scene!.remove(group);
-        this.beeMeshes.delete(id);
-      }
-    }
   }
 
   /**
