@@ -15,7 +15,7 @@
     <div class="status-cluster">
       <span class="mono tick">tick {{ tick().toLocaleString() }}</span>
       <span class="divider"></span>
-      <span class="mono hz">{{ tickRate }}&#8202;Hz</span>
+      <span class="mono hz">{{ tickRate() }}&#8202;Hz</span>
       <span class="conn" [class.conn--off]="!connected()">
         <span class="conn-dot"></span>{{ connected() ? 'Connected' : 'Disconnected' }}
       </span>
