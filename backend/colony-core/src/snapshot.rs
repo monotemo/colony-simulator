@@ -17,6 +17,11 @@ pub struct WorldSnapshot {
     pub bounds: Bounds,
     pub bees: Vec<BeeSnapshot>,
     pub resources: Vec<ResourceSnapshot>,
+    /// Honey in the colony store as a fraction in `[0, 1]`. Renamed on the wire
+    /// to match the `honeyStored` field the frontend already reads (the rest of
+    /// the format is single-word fields, so this is the one camelCase key).
+    #[serde(rename = "honeyStored")]
+    pub honey_stored: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +30,9 @@ pub struct BeeSnapshot {
     pub position: Vec3,
     pub velocity: Vec3,
     pub state: BeeState,
+    /// Remaining energy as a fraction in `[0, 1]`. The rail averages this across
+    /// the colony for its energy readout.
+    pub energy: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +54,7 @@ impl WorldSnapshot {
                 .iter()
                 .map(ResourceSnapshot::from_resource)
                 .collect(),
+            honey_stored: world.honey_stored,
         }
     }
 }
@@ -57,6 +66,7 @@ impl BeeSnapshot {
             position: bee.position,
             velocity: bee.velocity,
             state: bee.state,
+            energy: bee.energy,
         }
     }
 }

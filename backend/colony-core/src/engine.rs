@@ -98,6 +98,51 @@ mod tests {
     }
 
     #[test]
+    fn behavior_breakdown_shows_a_mix_over_a_run() {
+        use crate::bee::BeeState;
+
+        // Bees seed with staggered energy and have nectar to forage, so the
+        // colony spreads across states instead of moving in lockstep: hungry
+        // bees peel off to forage while the rest still wander. Over a run there
+        // must be a tick where at least two states coexist, and foraging — the
+        // behavior this slice adds — must show up. That is what lights up the
+        // frontend behavior breakdown.
+        let mut engine = Engine::seeded();
+        let mut saw_foraging = false;
+        let mut saw_two_states = false;
+        for _ in 0..1_200 {
+            engine.step(1.0 / 30.0);
+            let snap = engine.snapshot();
+            let (mut wandering, mut foraging, mut resting) = (0, 0, 0);
+            for bee in &snap.bees {
+                match bee.state {
+                    BeeState::Wandering => wandering += 1,
+                    BeeState::Foraging => foraging += 1,
+                    BeeState::Resting => resting += 1,
+                }
+            }
+            saw_foraging |= foraging > 0;
+            let distinct = (wandering > 0) as u8 + (foraging > 0) as u8 + (resting > 0) as u8;
+            saw_two_states |= distinct >= 2;
+        }
+        assert!(saw_foraging, "foraging should occur when nectar is available");
+        assert!(saw_two_states, "behavior breakdown should show a mix of states");
+    }
+
+    #[test]
+    fn snapshot_serializes_honey_with_camelcase_key() {
+        // The store field is `honey_stored` in Rust but must reach the frontend
+        // as `honeyStored`, the key the rail already reads. Guard the rename so
+        // the wire contract can't silently drift back to snake_case.
+        let engine = Engine::seeded();
+        let json = serde_json::to_string(&engine.snapshot()).expect("serialize");
+        assert!(
+            json.contains("\"honeyStored\""),
+            "wire key should be camelCase honeyStored: {json}"
+        );
+    }
+
+    #[test]
     fn snapshot_round_trips_through_json() {
         let engine = Engine::seeded();
         let snap = engine.snapshot();

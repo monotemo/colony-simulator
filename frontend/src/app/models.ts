@@ -22,10 +22,10 @@ export interface Bounds {
 }
 
 /**
- * What a bee is currently doing. The Rust engine only emits `wandering` today;
- * `foraging` and `resting` are part of the planned behavior model and are
- * included here so the UI breakdown lights up automatically once the backend
- * starts reporting them.
+ * What a bee is currently doing. All three variants now exist in the Rust
+ * `BeeState` enum, but the engine doesn't transition between them yet — every
+ * bee sits in `wandering` until the behavior state machine lands, at which point
+ * the UI breakdown lights up automatically.
  */
 export type BeeState = 'wandering' | 'foraging' | 'resting';
 
@@ -34,11 +34,8 @@ export interface BeeSnapshot {
   position: Vec3;
   velocity: Vec3;
   state: BeeState;
-  /**
-   * Remaining energy in `[0, 1]`. Optional: the current engine does not model
-   * energy yet, so it may be absent — the rail falls back to "full" when so.
-   */
-  energy?: number;
+  /** Remaining energy as a fraction in `[0, 1]`; the engine reports it for every bee. */
+  energy: number;
 }
 
 export type ResourceKind = 'nectar';
@@ -55,11 +52,8 @@ export interface WorldSnapshot {
   bounds: Bounds;
   bees: BeeSnapshot[];
   resources: ResourceSnapshot[];
-  /**
-   * Honey in store as a fraction in `[0, 1]`. Optional: honey storage is a
-   * planned system, so it may be absent — the rail shows `0%` until then.
-   */
-  honeyStored?: number;
+  /** Honey in store as a fraction in `[0, 1]`; the engine reports it each tick. */
+  honeyStored: number;
 }
 
 /**
