@@ -5,7 +5,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bee::Bee;
+use crate::bee::{Bee, BeeState};
 use crate::entity::{EntityId, IdAllocator};
 use crate::math::Vec3;
 
@@ -25,6 +25,27 @@ const SEPARATION_STRENGTH: f64 = 400.0;
 /// Ceiling on a bee's speed (world units / s) after steering, so accumulated
 /// separation pushes can't fling a bee arbitrarily fast.
 const MAX_SPEED: f64 = 120.0;
+
+/// Energy at or below which a wandering bee peels off to forage, provided there
+/// is nectar to seek. Deliberately above the rest threshold in `bee.rs`: with
+/// food available a bee refuels at a flower rather than dropping to rest, so
+/// `Resting` becomes the fallback for when no nectar is reachable.
+const FORAGE_ENERGY_THRESHOLD: f64 = 0.4;
+
+/// Energy at which a feeding bee is satisfied and returns to wandering.
+const FORAGE_SATISFIED_ENERGY: f64 = 0.9;
+
+/// Distance from a nectar source at which a bee counts as "at" it and feeds.
+const FORAGE_REACH_RADIUS: f64 = 20.0;
+
+/// Energy a feeding bee gains per second at a nectar source. Set well above the
+/// active drain in `bee.rs` so net energy climbs while feeding even though the
+/// flight cost still applies.
+const FORAGE_REFILL_PER_SECOND: f64 = 0.6;
+
+/// Steering acceleration (world units / s²) pulling a foraging bee toward its
+/// target nectar — a magnitude-based seek, mirroring the separation push.
+const FORAGE_SEEK_STRENGTH: f64 = 200.0;
 
 /// The box-shaped extent of the world, in world units. The origin is the
 /// top-left-front corner; valid positions satisfy `0 <= x <= width`,
@@ -173,15 +194,22 @@ impl World {
     ///    each bee integrate and bounce off the walls as before.
     ///
     /// Steering only ever nudges velocity; [`Bee::step`] stays the sole
-    /// authority that confines a bee to the world, so avoidance can never eject
-    /// one through a wall.
+    /// authority that confines a bee to the world, so neither avoidance nor the
+    /// foraging seek can eject one through a wall.
     pub fn step(&mut self, dt: f64) {
         // Disjoint borrows: the grid fills its own buffer from `&self.bees`,
         // then the integration loop mutates `self.bees` while reading the
-        // returned slice and `self.bounds`.
+        // returned slice, `self.resources`, and `self.bounds`.
         let accelerations = self.grid.separation_accelerations(&self.bees);
-        for (bee, accel) in self.bees.iter_mut().zip(accelerations) {
-            let mut velocity = bee.velocity.add(accel.scale(dt));
+        for (bee, &separation) in self.bees.iter_mut().zip(accelerations) {
+            // Foraging overlay: a hungry bee peels off to seek the nearest
+            // nectar and refuels on arrival, contributing a seek force folded in
+            // alongside separation. It reads only this bee and the immutable
+            // resources — never other bees — so it can't perturb the separation
+            // pass's ordering and determinism is preserved.
+            let seek = forage(bee, &self.resources, dt);
+
+            let mut velocity = bee.velocity.add(separation.add(seek).scale(dt));
             let speed_squared = velocity.length_squared();
             if speed_squared > MAX_SPEED * MAX_SPEED {
                 velocity = velocity.normalized().scale(MAX_SPEED);
@@ -316,6 +344,79 @@ fn separation_push(a: Vec3, b: Vec3) -> Option<Vec3> {
     let distance = distance_squared.sqrt();
     let closeness = (SEPARATION_RADIUS - distance) / SEPARATION_RADIUS;
     Some(offset.scale(SEPARATION_STRENGTH * closeness / distance))
+}
+
+/// Foraging behavior for a single bee, run once per tick before integration.
+///
+/// Drives the entry and exit of [`BeeState::Foraging`] and returns the seek
+/// acceleration to fold into this bee's steering (`Vec3::ZERO` when it isn't
+/// foraging). A wandering bee that drops to [`FORAGE_ENERGY_THRESHOLD`] commits
+/// to foraging if there is nectar to chase; a foraging bee steers toward the
+/// nearest source and, once within [`FORAGE_REACH_RADIUS`], feeds until
+/// satisfied and returns to wandering — keeping its momentum so it drifts back
+/// out naturally.
+///
+/// Reads only `bee` and the immutable `resources`, never other bees, so it is
+/// order-independent and leaves the engine's determinism intact. Nectar is an
+/// inexhaustible well for this slice — feeding doesn't deplete it. The active
+/// energy drain still lives in [`Bee::step_energy_and_state`]; the refill here
+/// is set to outpace it, so net energy rises while feeding.
+fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> Vec3 {
+    // A hungry wanderer commits to foraging, but only if there's nectar to find.
+    if bee.state == BeeState::Wandering
+        && bee.energy <= FORAGE_ENERGY_THRESHOLD
+        && nearest_nectar(bee.position, resources).is_some()
+    {
+        bee.state = BeeState::Foraging;
+    }
+
+    if bee.state != BeeState::Foraging {
+        return Vec3::ZERO;
+    }
+
+    let Some((target, distance_squared)) = nearest_nectar(bee.position, resources) else {
+        // No nectar to chase (today's world never empties, but stay robust):
+        // abandon the pursuit and let the wander/rest cycle resume.
+        bee.state = BeeState::Wandering;
+        return Vec3::ZERO;
+    };
+
+    if distance_squared <= FORAGE_REACH_RADIUS * FORAGE_REACH_RADIUS {
+        // At the flower: feed. The refill outpaces the active drain that
+        // `step_energy_and_state` still applies this tick, so net energy climbs.
+        bee.energy = (bee.energy + FORAGE_REFILL_PER_SECOND * dt).clamp(0.0, 1.0);
+        if bee.energy >= FORAGE_SATISFIED_ENERGY {
+            bee.state = BeeState::Wandering;
+        }
+    }
+
+    // Steer toward the flower; `normalized` yields ZERO when coincident, so a
+    // bee sitting exactly on a source simply feeds in place.
+    target
+        .sub(bee.position)
+        .normalized()
+        .scale(FORAGE_SEEK_STRENGTH)
+}
+
+/// The position of the nectar source nearest `position`, with its squared
+/// distance, or `None` when there is no nectar. Ties on distance are broken by
+/// the lower slice index — and since resources are pushed in id order, that is
+/// the lower entity id — so the choice is pinned and foraging stays
+/// deterministic regardless of how floats happen to land.
+fn nearest_nectar(position: Vec3, resources: &[Resource]) -> Option<(Vec3, f64)> {
+    let mut best: Option<(Vec3, f64)> = None;
+    for resource in resources {
+        if resource.kind != ResourceKind::Nectar {
+            continue;
+        }
+        let distance_squared = position.distance_squared(resource.position);
+        // Strictly closer wins; an equal distance leaves the earlier (lower-id)
+        // source in place, which is what pins the tie-break.
+        if best.is_none_or(|(_, best_distance)| distance_squared < best_distance) {
+            best = Some((resource.position, distance_squared));
+        }
+    }
+    best
 }
 
 /// A grid keyed by integer cell coordinates, hashed with [`CellHasher`].
@@ -454,6 +555,52 @@ mod tests {
         let swapped_accel = swapped.separation_accelerations();
         assert_eq!(accel[0], swapped_accel[1]);
         assert_eq!(accel[1], swapped_accel[0]);
+    }
+
+    #[test]
+    fn hungry_bee_forages_toward_nectar_and_refuels() {
+        let mut world = World::empty(Bounds::new(400.0, 400.0, 400.0));
+        let flower = Vec3::new(200.0, 200.0, 0.0);
+        world.add_resource(flower, ResourceKind::Nectar);
+        // A hungry bee a little way off, drifting nowhere in particular.
+        world.spawn_bee(Vec3::new(120.0, 200.0, 0.0), Vec3::ZERO);
+        world.bees[0].energy = FORAGE_ENERGY_THRESHOLD;
+
+        // With nectar present and energy at the threshold, the first step commits
+        // the bee to foraging.
+        world.step(1.0 / 30.0);
+        assert_eq!(world.bees[0].state, BeeState::Foraging);
+
+        // Let it fly in and feed, tracking how close it gets and how high its
+        // energy climbs (it may satisfy and wander off again before the end).
+        let start_distance = world.bees[0].position.distance_squared(flower);
+        let mut min_distance = start_distance;
+        let mut max_energy = world.bees[0].energy;
+        for _ in 0..600 {
+            world.step(1.0 / 30.0);
+            min_distance = min_distance.min(world.bees[0].position.distance_squared(flower));
+            max_energy = max_energy.max(world.bees[0].energy);
+        }
+
+        assert!(min_distance < start_distance, "bee should move toward the nectar");
+        assert!(
+            max_energy > FORAGE_ENERGY_THRESHOLD,
+            "bee should regain energy by foraging"
+        );
+    }
+
+    #[test]
+    fn nearest_nectar_breaks_ties_by_lower_id() {
+        // Two nectar sources equidistant from the bee: the one added first (the
+        // lower id, hence lower slice index) must win, deterministically.
+        let mut world = World::empty(Bounds::new(400.0, 400.0, 400.0));
+        let first = Vec3::new(100.0, 200.0, 0.0);
+        let second = Vec3::new(300.0, 200.0, 0.0);
+        world.add_resource(first, ResourceKind::Nectar);
+        world.add_resource(second, ResourceKind::Nectar);
+        let from = Vec3::new(200.0, 200.0, 0.0); // exactly between them
+        let (target, _) = nearest_nectar(from, &world.resources).expect("nectar exists");
+        assert_eq!(target, first);
     }
 
     #[test]

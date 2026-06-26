@@ -101,31 +101,32 @@ mod tests {
     fn behavior_breakdown_shows_a_mix_over_a_run() {
         use crate::bee::BeeState;
 
-        // Bees seed with staggered energy, so once the rest/wake cycle gets
-        // going the colony spreads across states instead of moving in lockstep.
-        // Over a run there must be a tick where wandering and resting bees
-        // coexist — that is what lights up the frontend behavior breakdown.
+        // Bees seed with staggered energy and have nectar to forage, so the
+        // colony spreads across states instead of moving in lockstep: hungry
+        // bees peel off to forage while the rest still wander. Over a run there
+        // must be a tick where at least two states coexist, and foraging — the
+        // behavior this slice adds — must show up. That is what lights up the
+        // frontend behavior breakdown.
         let mut engine = Engine::seeded();
-        let mut saw_mix = false;
+        let mut saw_foraging = false;
+        let mut saw_two_states = false;
         for _ in 0..1_200 {
             engine.step(1.0 / 30.0);
             let snap = engine.snapshot();
-            let resting = snap
-                .bees
-                .iter()
-                .filter(|b| b.state == BeeState::Resting)
-                .count();
-            let wandering = snap
-                .bees
-                .iter()
-                .filter(|b| b.state == BeeState::Wandering)
-                .count();
-            if resting > 0 && wandering > 0 {
-                saw_mix = true;
-                break;
+            let (mut wandering, mut foraging, mut resting) = (0, 0, 0);
+            for bee in &snap.bees {
+                match bee.state {
+                    BeeState::Wandering => wandering += 1,
+                    BeeState::Foraging => foraging += 1,
+                    BeeState::Resting => resting += 1,
+                }
             }
+            saw_foraging |= foraging > 0;
+            let distinct = (wandering > 0) as u8 + (foraging > 0) as u8 + (resting > 0) as u8;
+            saw_two_states |= distinct >= 2;
         }
-        assert!(saw_mix, "behavior breakdown should show a mix of states");
+        assert!(saw_foraging, "foraging should occur when nectar is available");
+        assert!(saw_two_states, "behavior breakdown should show a mix of states");
     }
 
     #[test]
