@@ -142,6 +142,15 @@ impl World {
             let speed = 60.0 * fract(t + 0.5);
             let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
             world.spawn_bee(position, velocity);
+
+            // Stagger starting energy across the colony. Identical full reserves
+            // would drain in lockstep, so every bee would hit the rest threshold
+            // on the same tick and the behavior breakdown would be all-or-nothing.
+            // Spreading the initial energy desynchronizes the rest/wake cycle so a
+            // live mix of wandering and resting bees is always on screen. Like the
+            // position and velocity above, it is parameterized on the bee index —
+            // deterministic, no RNG.
+            world.bees.last_mut().expect("just spawned a bee").energy = 0.5 + 0.5 * fract(t * 5.0);
         }
 
         for (fx, fy) in [(0.25, 0.3), (0.7, 0.25), (0.5, 0.75), (0.8, 0.7)] {

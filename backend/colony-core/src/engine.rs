@@ -98,6 +98,37 @@ mod tests {
     }
 
     #[test]
+    fn behavior_breakdown_shows_a_mix_over_a_run() {
+        use crate::bee::BeeState;
+
+        // Bees seed with staggered energy, so once the rest/wake cycle gets
+        // going the colony spreads across states instead of moving in lockstep.
+        // Over a run there must be a tick where wandering and resting bees
+        // coexist — that is what lights up the frontend behavior breakdown.
+        let mut engine = Engine::seeded();
+        let mut saw_mix = false;
+        for _ in 0..1_200 {
+            engine.step(1.0 / 30.0);
+            let snap = engine.snapshot();
+            let resting = snap
+                .bees
+                .iter()
+                .filter(|b| b.state == BeeState::Resting)
+                .count();
+            let wandering = snap
+                .bees
+                .iter()
+                .filter(|b| b.state == BeeState::Wandering)
+                .count();
+            if resting > 0 && wandering > 0 {
+                saw_mix = true;
+                break;
+            }
+        }
+        assert!(saw_mix, "behavior breakdown should show a mix of states");
+    }
+
+    #[test]
     fn snapshot_round_trips_through_json() {
         let engine = Engine::seeded();
         let snap = engine.snapshot();
