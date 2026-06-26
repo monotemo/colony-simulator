@@ -25,6 +25,9 @@ pub struct BeeSnapshot {
     pub position: Vec3,
     pub velocity: Vec3,
     pub state: BeeState,
+    /// Remaining energy as a fraction in `[0, 1]`. The rail averages this across
+    /// the colony for its energy readout.
+    pub energy: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +60,7 @@ impl BeeSnapshot {
             position: bee.position,
             velocity: bee.velocity,
             state: bee.state,
+            energy: bee.energy,
         }
     }
 }

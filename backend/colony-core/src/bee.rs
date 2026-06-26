@@ -8,13 +8,24 @@ use crate::world::Bounds;
 
 /// What a bee is currently doing.
 ///
-/// Intentionally minimal for this slice — additional states (`Foraging`,
-/// `Returning`, `Resting`, …) slot in here as behavior grows.
+/// `Foraging` (heading to or harvesting nectar) and `Resting` (recovering
+/// energy) join the original `Wandering`. The variants exist so snapshots can
+/// carry them and the renderer can tint by state; the logic that *transitions*
+/// a bee between them lands with the behavior state machine, so for now every
+/// bee stays `Wandering`. Further states (`Returning`, …) slot in the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BeeState {
     Wandering,
+    Foraging,
+    Resting,
 }
+
+/// Energy a bee spends per second, as a fraction of a full reserve. A flat
+/// drain for this slice — the behavior state machine will scale it by what the
+/// bee is doing (active states drain faster, resting refills). At this rate a
+/// bee runs from full to empty in 50 s of continuous activity.
+const ENERGY_DRAIN_PER_SECOND: f64 = 0.02;
 
 /// A single bee in the colony.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +34,10 @@ pub struct Bee {
     pub position: Vec3,
     pub velocity: Vec3,
     pub state: BeeState,
+    /// Remaining energy as a fraction in `[0, 1]`; bees spawn full at `1.0` and
+    /// drain over time (see [`Bee::step`]). Clamped at empty each tick — refill
+    /// (resting, nectar) arrives with the foraging/behavior slices.
+    pub energy: f64,
 }
 
 impl Bee {
@@ -32,6 +47,7 @@ impl Bee {
             position,
             velocity,
             state: BeeState::Wandering,
+            energy: 1.0,
         }
     }
 
@@ -43,7 +59,13 @@ impl Bee {
     /// All three axes are confined symmetrically — the z (flight) axis is live
     /// even though bees currently start flat at `z = 0` with no vertical
     /// velocity, so the dimension is exercised the moment flight is introduced.
+    ///
+    /// Energy is spent here too: a flat drain per tick, clamped at empty so it
+    /// never goes negative. This stays a pure single-entity update — the drain
+    /// depends only on `dt`, not on neighbours — so determinism is unaffected.
     pub fn step(&mut self, dt: f64, bounds: Bounds) {
+        self.energy = (self.energy - ENERGY_DRAIN_PER_SECOND * dt).max(0.0);
+
         let mut next = self.position.add(self.velocity.scale(dt));
 
         if next.x < 0.0 {
@@ -104,6 +126,32 @@ mod tests {
         assert!(bee.position.x >= 0.0);
         // Velocity reflected, so it now heads away from the wall.
         assert!(bee.velocity.x < 0.0);
+    }
+
+    #[test]
+    fn bee_spawns_with_full_energy() {
+        let bee = Bee::new(EntityId(0), Vec3::ZERO, Vec3::ZERO);
+        assert_eq!(bee.energy, 1.0);
+        assert_eq!(bee.state, BeeState::Wandering);
+    }
+
+    #[test]
+    fn stepping_drains_energy() {
+        let bounds = Bounds::new(100.0, 100.0, 100.0);
+        let mut bee = Bee::new(EntityId(0), Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
+        bee.step(1.0, bounds);
+        // A full second of the flat drain rate, and never above the start value.
+        assert_eq!(bee.energy, 1.0 - ENERGY_DRAIN_PER_SECOND);
+        assert!(bee.energy < 1.0);
+    }
+
+    #[test]
+    fn energy_clamps_at_empty() {
+        let bounds = Bounds::new(100.0, 100.0, 100.0);
+        let mut bee = Bee::new(EntityId(0), Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
+        // Far more time than it takes to exhaust the reserve; it must floor at 0.
+        bee.step(1_000.0, bounds);
+        assert_eq!(bee.energy, 0.0);
     }
 
     #[test]
