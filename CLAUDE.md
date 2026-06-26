@@ -48,6 +48,19 @@ frontend/                Angular 20 app (standalone components, signals)
 - **`running` is service-owned.** Both transports start already running, so the
   UI binds to `sim.running()` for Start/Pause state rather than tracking its own
   guess. `reset` does not change running.
+- **Cross-entity systems must stay deterministic.** Collision avoidance lives in
+  `World::step` (not `Bee::step`, which stays a pure single-entity integrator and
+  remains the *sole* authority that confines a bee to the bounds — steering only
+  nudges velocity, so it can never eject a bee through a wall). It runs in two
+  strict passes — compute every bee's separation force from immutable positions,
+  *then* apply — so the result is independent of iteration order. Anything that
+  sums floats across entities must pin its order (we walk pairs `i < j` and the
+  grid sorts candidates ascending to match) or results drift. Two guards enforce
+  this: `stepping_from_the_seed_is_deterministic` (same seed → bit-identical
+  trajectory) and `grid_matches_naive` (the spatial grid must equal the naive
+  all-pairs oracle bit-for-bit). Keep the naive reference around as the oracle
+  whenever you optimize a broad phase. The engine has **no RNG**; if you ever add
+  one, seed it explicitly and thread it through so determinism survives.
 - All three.js setup runs in `afterNextRender` and is wrapped so it bails
   gracefully when there is no WebGL context (headless/SSR).
 
@@ -80,6 +93,34 @@ npm run build:pages              # wasm-pack + ng build for GitHub Pages
   crate.
 - Match the surrounding code's comment density and naming; the existing files
   are heavily doc-commented — explain *why*, not *what*.
+
+## Benchmarking & performance (colony-core)
+
+`colony-core` has a criterion bench at `backend/colony-core/benches/step.rs`
+timing `Engine::step` across colony sizes. Lessons worth keeping:
+
+- **Measure before optimizing a hot path, and bracket behavior changes with a
+  saved baseline.** `cargo bench -p colony-core --bench step -- --save-baseline
+  <name>` before, `--baseline <name>` after. **Scope to `--bench step`** — a bare
+  `cargo bench` also runs the lib's libtest harness, which rejects criterion's
+  flags (`Unrecognized option: 'save-baseline'`).
+- **Benchmark the scenario that actually runs.** The runtimes step one engine
+  continuously, so the *warm* bench (`engine_step_warm`, steps in place) is the
+  representative cost; the *cold* bench (`iter_batched` cloning a fresh engine)
+  measures only the first step and, because each iteration starts from pristine
+  state, never exercises buffer reuse. Optimizing against the wrong one misleads.
+- **Profile, don't guess, what's expensive.** Per-tick allocation looked like the
+  cost; it wasn't. At scale the broad phase was dominated by **SipHash** over the
+  grid's integer cell keys (~`n × 27` lookups/tick). A tiny no-seed multiply-rotate
+  `CellHasher` (cell keys are trusted internal integers — DoS resistance is moot,
+  determinism is not) cut the step 60–76%. A custom `Hasher` is the lean,
+  no-dependency way to escape SipHash here.
+- **Density, not population, is the scaling limit.** The grid is O(n · local
+  density). In the fixed-size world (bees still flat at `z = 0`), density rises
+  with `n`, so it degrades toward O(n²). True large-swarm scaling means bounding
+  density first — grow the world with population and/or use the live `z` axis —
+  before chasing further constant factors (flat array grid, dropping the per-bee
+  sort behind a relaxed determinism check, rayon over the read-only first pass).
 
 ## Testing gotcha (containers / CI)
 
