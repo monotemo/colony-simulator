@@ -1,0 +1,85 @@
+name: CI
+
+# Validate the migration-critical paths on a real runner before anything merges:
+# the Angular build + unit tests on Node 24, and the Rust core tests + the
+# WebAssembly build. The Pages workflow only *builds* on push to main/beta, so
+# this is where tests actually run.
+on:
+  pull_request:
+  push:
+    branches: [main, beta]
+
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref (PR or branch); the latest push wins.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Angular build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npx ng build
+
+      # Karma launches Chrome, which fails with a sandbox error as root in CI.
+      # Per CLAUDE.md, point CHROME_BIN at a wrapper that adds --no-sandbox rather
+      # than committing a karma.conf (that would drop the builder's Jasmine wiring).
+      # The harmless "could not create a WebGL context" log is expected — the
+      # three.js renderer catches it and the tests still pass.
+      - name: Unit tests
+        working-directory: frontend
+        run: |
+          cat > "$RUNNER_TEMP/chrome-no-sandbox" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser)" \
+            --no-sandbox --disable-gpu --disable-dev-shm-usage "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/chrome-no-sandbox"
+          CHROME_BIN="$RUNNER_TEMP/chrome-no-sandbox" \
+            npx ng test --watch=false --browsers=ChromeHeadless
+
+  wasm:
+    name: Core tests & WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (with wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        # Official installer script (fetches a prebuilt binary). The former
+        # jetli/wasm-pack-action stalled on the deprecated Node16 runtime.
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # The deterministic heart: colony-core's unit tests, including the
+      # seed-stability and grid-vs-naive guards.
+      - name: Core tests
+        working-directory: backend
+        run: cargo test -p colony-core
+
+      # Prove the engine still compiles to wasm — the path the production Pages
+      # build depends on and the one hardest to validate elsewhere.
+      - name: WebAssembly build
+        working-directory: backend
+        run: wasm-pack build colony-wasm --target web --release
