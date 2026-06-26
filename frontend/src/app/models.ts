@@ -52,11 +52,8 @@ export interface WorldSnapshot {
   bounds: Bounds;
   bees: BeeSnapshot[];
   resources: ResourceSnapshot[];
-  /**
-   * Honey in store as a fraction in `[0, 1]`. Optional: honey storage is a
-   * planned system, so it may be absent — the rail shows `0%` until then.
-   */
-  honeyStored?: number;
+  /** Honey in store as a fraction in `[0, 1]`; the engine reports it each tick. */
+  honeyStored: number;
 }
 
 /**

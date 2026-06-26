@@ -130,6 +130,19 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_serializes_honey_with_camelcase_key() {
+        // The store field is `honey_stored` in Rust but must reach the frontend
+        // as `honeyStored`, the key the rail already reads. Guard the rename so
+        // the wire contract can't silently drift back to snake_case.
+        let engine = Engine::seeded();
+        let json = serde_json::to_string(&engine.snapshot()).expect("serialize");
+        assert!(
+            json.contains("\"honeyStored\""),
+            "wire key should be camelCase honeyStored: {json}"
+        );
+    }
+
+    #[test]
     fn snapshot_round_trips_through_json() {
         let engine = Engine::seeded();
         let snap = engine.snapshot();

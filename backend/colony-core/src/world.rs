@@ -47,6 +47,17 @@ const FORAGE_REFILL_PER_SECOND: f64 = 0.6;
 /// target nectar — a magnitude-based seek, mirroring the separation push.
 const FORAGE_SEEK_STRENGTH: f64 = 200.0;
 
+/// Honey a single bee adds to the colony store per second while feeding at a
+/// nectar source, as a fraction of the store's capacity. The store is tracked
+/// normalized to `[0, 1]` (see [`World::honey_stored`]); a handful of bees
+/// feeding fills it over tens of seconds.
+const HONEY_HARVEST_PER_BEE_PER_SECOND: f64 = 0.02;
+
+/// Honey the colony consumes per second, as a fraction of capacity. A slow,
+/// constant draw so the store ebbs when little foraging is happening rather than
+/// only ever climbing — the level settles where harvest and consumption balance.
+const HONEY_CONSUMPTION_PER_SECOND: f64 = 0.01;
+
 /// The box-shaped extent of the world, in world units. The origin is the
 /// top-left-front corner; valid positions satisfy `0 <= x <= width`,
 /// `0 <= y <= height`, and `0 <= z <= depth`.
@@ -93,6 +104,11 @@ pub struct World {
     pub bounds: Bounds,
     pub bees: Vec<Bee>,
     pub resources: Vec<Resource>,
+    /// Honey in the colony store, as a fraction in `[0, 1]`. Rises as bees
+    /// harvest nectar while feeding (see [`forage`]) and ebbs from a slow,
+    /// constant consumption, clamped to the range each tick. Surfaced on the
+    /// snapshot as `honeyStored`.
+    pub honey_stored: f64,
     ids: IdAllocator,
     /// Reusable scratch for the per-tick separation broad phase. Holds no
     /// simulation state — it is cleared and rebuilt every [`World::step`] — so
@@ -108,6 +124,7 @@ impl World {
             bounds,
             bees: Vec::new(),
             resources: Vec::new(),
+            honey_stored: 0.0,
             ids: IdAllocator::new(),
             grid: SpatialGrid::default(),
         }
@@ -201,13 +218,18 @@ impl World {
         // then the integration loop mutates `self.bees` while reading the
         // returned slice, `self.resources`, and `self.bounds`.
         let accelerations = self.grid.separation_accelerations(&self.bees);
+        // Honey harvested across the colony this tick, summed in bee-index order
+        // into a local before it touches the store, so the total is reproducible.
+        let mut harvested = 0.0;
         for (bee, &separation) in self.bees.iter_mut().zip(accelerations) {
             // Foraging overlay: a hungry bee peels off to seek the nearest
             // nectar and refuels on arrival, contributing a seek force folded in
-            // alongside separation. It reads only this bee and the immutable
-            // resources — never other bees — so it can't perturb the separation
-            // pass's ordering and determinism is preserved.
-            let seek = forage(bee, &self.resources, dt);
+            // alongside separation and any honey it harvests while feeding. It
+            // reads only this bee and the immutable resources — never other bees
+            // — so it can't perturb the separation pass's ordering and
+            // determinism is preserved.
+            let (seek, honey) = forage(bee, &self.resources, dt);
+            harvested += honey;
 
             let mut velocity = bee.velocity.add(separation.add(seek).scale(dt));
             let speed_squared = velocity.length_squared();
@@ -217,6 +239,11 @@ impl World {
             bee.velocity = velocity;
             bee.step(dt, self.bounds);
         }
+
+        // Fold this tick's harvest into the store and let the colony's slow
+        // consumption draw it down, clamped to [0, 1].
+        self.honey_stored =
+            (self.honey_stored + harvested - HONEY_CONSUMPTION_PER_SECOND * dt).clamp(0.0, 1.0);
     }
 
     /// Separation accelerations for every bee, in bee order — a test-facing
@@ -349,19 +376,21 @@ fn separation_push(a: Vec3, b: Vec3) -> Option<Vec3> {
 /// Foraging behavior for a single bee, run once per tick before integration.
 ///
 /// Drives the entry and exit of [`BeeState::Foraging`] and returns the seek
-/// acceleration to fold into this bee's steering (`Vec3::ZERO` when it isn't
-/// foraging). A wandering bee that drops to [`FORAGE_ENERGY_THRESHOLD`] commits
-/// to foraging if there is nectar to chase; a foraging bee steers toward the
-/// nearest source and, once within [`FORAGE_REACH_RADIUS`], feeds until
-/// satisfied and returns to wandering — keeping its momentum so it drifts back
-/// out naturally.
+/// acceleration to fold into this bee's steering, paired with the honey it
+/// harvests this tick (both zero when it isn't feeding). A wandering bee that
+/// drops to [`FORAGE_ENERGY_THRESHOLD`] commits to foraging if there is nectar
+/// to chase; a foraging bee steers toward the nearest source and, once within
+/// [`FORAGE_REACH_RADIUS`], feeds — refuelling itself and harvesting honey for
+/// the colony — until satisfied, then returns to wandering, keeping its momentum
+/// so it drifts back out naturally.
 ///
 /// Reads only `bee` and the immutable `resources`, never other bees, so it is
 /// order-independent and leaves the engine's determinism intact. Nectar is an
-/// inexhaustible well for this slice — feeding doesn't deplete it. The active
-/// energy drain still lives in [`Bee::step_energy_and_state`]; the refill here
-/// is set to outpace it, so net energy rises while feeding.
-fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> Vec3 {
+/// inexhaustible well for this slice — feeding depletes neither the source nor
+/// disturbs other bees. The active energy drain still lives in
+/// [`Bee::step_energy_and_state`]; the refill here is set to outpace it, so net
+/// energy rises while feeding.
+fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> (Vec3, f64) {
     // A hungry wanderer commits to foraging, but only if there's nectar to find.
     if bee.state == BeeState::Wandering
         && bee.energy <= FORAGE_ENERGY_THRESHOLD
@@ -371,20 +400,23 @@ fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> Vec3 {
     }
 
     if bee.state != BeeState::Foraging {
-        return Vec3::ZERO;
+        return (Vec3::ZERO, 0.0);
     }
 
     let Some((target, distance_squared)) = nearest_nectar(bee.position, resources) else {
         // No nectar to chase (today's world never empties, but stay robust):
         // abandon the pursuit and let the wander/rest cycle resume.
         bee.state = BeeState::Wandering;
-        return Vec3::ZERO;
+        return (Vec3::ZERO, 0.0);
     };
 
+    let mut harvested = 0.0;
     if distance_squared <= FORAGE_REACH_RADIUS * FORAGE_REACH_RADIUS {
         // At the flower: feed. The refill outpaces the active drain that
-        // `step_energy_and_state` still applies this tick, so net energy climbs.
+        // `step_energy_and_state` still applies this tick, so net energy climbs,
+        // and the colony banks honey for as long as the bee keeps feeding.
         bee.energy = (bee.energy + FORAGE_REFILL_PER_SECOND * dt).clamp(0.0, 1.0);
+        harvested = HONEY_HARVEST_PER_BEE_PER_SECOND * dt;
         if bee.energy >= FORAGE_SATISFIED_ENERGY {
             bee.state = BeeState::Wandering;
         }
@@ -392,10 +424,11 @@ fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> Vec3 {
 
     // Steer toward the flower; `normalized` yields ZERO when coincident, so a
     // bee sitting exactly on a source simply feeds in place.
-    target
+    let seek = target
         .sub(bee.position)
         .normalized()
-        .scale(FORAGE_SEEK_STRENGTH)
+        .scale(FORAGE_SEEK_STRENGTH);
+    (seek, harvested)
 }
 
 /// The position of the nectar source nearest `position`, with its squared
@@ -587,6 +620,24 @@ mod tests {
             max_energy > FORAGE_ENERGY_THRESHOLD,
             "bee should regain energy by foraging"
         );
+    }
+
+    #[test]
+    fn foraging_banks_honey_within_bounds() {
+        let mut world = World::seeded();
+        assert_eq!(world.honey_stored, 0.0);
+
+        let mut max_honey = 0.0_f64;
+        for _ in 0..1_200 {
+            world.step(1.0 / 30.0);
+            assert!(
+                (0.0..=1.0).contains(&world.honey_stored),
+                "honey must stay in [0, 1], was {}",
+                world.honey_stored
+            );
+            max_honey = max_honey.max(world.honey_stored);
+        }
+        assert!(max_honey > 0.0, "bees foraging should bank honey for the colony");
     }
 
     #[test]
