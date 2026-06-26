@@ -1,10 +1,18 @@
 name: Deploy to GitHub Pages
 
 # Build the Angular PWA (with the Rust simulation compiled to WebAssembly) and
-# publish it to GitHub Pages. Runs on pushes to main and on manual dispatch.
+# publish it to GitHub Pages. A push to either `main` or `beta` triggers a full
+# redeploy.
+#
+# GitHub Pages serves a single site per repo, and the "GitHub Actions" source
+# replaces that entire site with one uploaded artifact each run. To host two
+# channels side by side we therefore build *both* branches in one job and stage
+# them into a single artifact: `main` at the site root, `beta` under `/beta/`.
+# Every run reflects the current HEAD of both branches, so a push to one channel
+# rebuilds the other from its own HEAD too (stable, so the result is the same).
 on:
   push:
-    branches: [main]
+    branches: [main, beta]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +20,8 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment; don't cancel an in-progress one.
+# Allow one concurrent deployment; don't cancel an in-progress one. This also
+# serialises overlapping main/beta pushes so their combined deploys can't race.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -21,7 +30,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      # Check out both channels side by side. `beta` may not exist yet, so its
+      # checkout is best-effort — a missing branch must not fail the main deploy.
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: main
+
+      - name: Check out beta
+        uses: actions/checkout@v7
+        with:
+          ref: beta
+          path: beta
+        continue-on-error: true
 
       - name: Install Rust (with wasm target)
         uses: dtolnay/rust-toolchain@stable
@@ -38,24 +60,38 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: main/frontend/package-lock.json
 
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
+      # Build main into the site root. This is the production channel, so its
+      # failure must fail the run (no broken prod deploy).
+      - name: Build main → site root
+        working-directory: main/frontend
+        run: |
+          npm ci
+          wasm-pack build ../backend/colony-wasm --target web --release --out-dir "$PWD/public/wasm"
+          npx ng build --base-href /colony-simulator/
+          mkdir -p "$GITHUB_WORKSPACE/site"
+          cp -r dist/colony-simulator/browser/. "$GITHUB_WORKSPACE/site/"
 
-      - name: Build WebAssembly package
-        working-directory: frontend
-        run: wasm-pack build ../backend/colony-wasm --target web --release --out-dir "$PWD/public/wasm"
-
-      - name: Build Angular app
-        working-directory: frontend
-        run: npx ng build --base-href /colony-simulator/
+      # Build beta into the /beta subpath. Skipped when the branch doesn't exist,
+      # and non-blocking when it does: a broken beta build must never hold up a
+      # production deploy. Trade-off of the single-artifact model — when a beta
+      # build fails, /beta is absent from that deploy until the next green build.
+      - name: Build beta → /beta subpath
+        if: hashFiles('beta/frontend/package.json') != ''
+        continue-on-error: true
+        working-directory: beta/frontend
+        run: |
+          npm ci
+          wasm-pack build ../backend/colony-wasm --target web --release --out-dir "$PWD/public/wasm"
+          npx ng build --base-href /colony-simulator/beta/
+          mkdir -p "$GITHUB_WORKSPACE/site/beta"
+          cp -r dist/colony-simulator/browser/. "$GITHUB_WORKSPACE/site/beta/"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: frontend/dist/colony-simulator/browser
+          path: site
 
   deploy:
     needs: build
