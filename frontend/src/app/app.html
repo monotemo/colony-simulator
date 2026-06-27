@@ -101,6 +101,27 @@
             <span class="mono zoom-readout">{{ zoomPercent() }}%</span>
             <button type="button" class="zoom-btn" (click)="zoomIn()" aria-label="Zoom in">+</button>
           </div>
+
+          @if (followedBeeId() !== null) {
+            <span class="dock-divider"></span>
+            <div class="follow" role="status">
+              <span class="follow-dot"></span>
+              <span class="follow-text">
+                Following <strong class="mono">#{{ followedBeeId() }}</strong>
+                @if (followLabel()) {
+                  <span class="follow-meta">{{ followLabel() }}</span>
+                }
+              </span>
+              <button
+                type="button"
+                class="follow-clear"
+                (click)="stopFollow()"
+                aria-label="Stop following"
+              >
+                &#10005;
+              </button>
+            </div>
+          }
         </div>
       </div>
     </section>
