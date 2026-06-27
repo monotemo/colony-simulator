@@ -214,28 +214,19 @@ impl Bee {
         };
         self.energy = (self.energy + rate * dt).clamp(0.0, 1.0);
 
-        // Rest/wake hysteresis, scoped to each caste's own state set: a worn-out
-        // bee drops to `Resting`; a recovered one wakes into its home activity.
-        let spent = self.energy <= REST_ENERGY_THRESHOLD;
-        let recovered = self.energy >= WAKE_ENERGY_THRESHOLD;
-        match self.class {
-            BeeClass::Worker => match self.state {
-                BeeState::Resting if recovered => self.state = BeeState::Wandering,
-                BeeState::Wandering | BeeState::Foraging | BeeState::BuildingComb if spent => {
-                    self.state = BeeState::Resting;
-                }
-                _ => {}
-            },
-            BeeClass::Queen => match self.state {
-                BeeState::Resting if recovered => self.state = BeeState::LayingEggs,
-                BeeState::LayingEggs if spent => self.state = BeeState::Resting,
-                _ => {}
-            },
-            BeeClass::Drone => match self.state {
-                BeeState::Resting if recovered => self.state = BeeState::Loafing,
-                BeeState::Loafing | BeeState::Flying if spent => self.state = BeeState::Resting,
-                _ => {}
-            },
+        // Rest/wake hysteresis, caste-agnostic by construction: a recovered
+        // resting bee wakes into its caste's home activity (the same state it
+        // spawned in), and *any* active state — whatever the caste was doing —
+        // drops to `Resting` once spent. Keeping this generic rather than per
+        // caste means a new active state automatically rests when worn out;
+        // there is no per-caste arm to forget to update alongside the drain
+        // rates above.
+        if self.state == BeeState::Resting {
+            if self.energy >= WAKE_ENERGY_THRESHOLD {
+                self.state = self.class.initial_state();
+            }
+        } else if self.energy <= REST_ENERGY_THRESHOLD {
+            self.state = BeeState::Resting;
         }
     }
 }
