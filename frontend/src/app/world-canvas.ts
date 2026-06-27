@@ -45,6 +45,8 @@ import { BeeClass, BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
         display: block;
         width: 100%;
         height: 100%;
+        /* The canvas is interactive: click a bee to lock the follow-cam on it. */
+        cursor: pointer;
       }
     `,
   ],
@@ -57,12 +59,23 @@ export class WorldCanvas implements OnDestroy {
   /** Current camera zoom as a whole percentage, for the dock readout. */
   readonly zoomPercent = signal(100);
 
+  /**
+   * Stable id of the bee the follow-cam is locked onto, or `null` when the
+   * camera is free and framing the whole world. Clicking a bee sets it; clicking
+   * empty space (or the dock's clear button) releases it. It is a signal so the
+   * dashboard can show a "following" chip and so the snapshot render effect
+   * re-centres the moment the selection changes, even while paused.
+   */
+  readonly followedBeeId = signal<number | null>(null);
+
   // three.js handles, created in afterNextRender (browser only).
   private renderer?: THREE.WebGLRenderer;
   private scene?: THREE.Scene;
   private camera?: THREE.OrthographicCamera;
   private resizeObserver?: ResizeObserver;
+  private raycaster?: THREE.Raycaster;
   private readonly onWheel = (event: WheelEvent) => this.handleWheel(event);
+  private readonly onClick = (event: MouseEvent) => this.handleClick(event);
 
   // Shared geometry/materials — one of each, reused across every entity. A bee
   // is composed from a handful of flat shapes laid out in the x/y plane: an
@@ -119,6 +132,20 @@ export class WorldCanvas implements OnDestroy {
   private readonly queenMaterial = this.glowMaterial(0xe0a12b, 0xffe08a, 0.7);
   private hive?: THREE.Mesh;
   private queen?: THREE.Mesh;
+
+  // A luminous ring laid over the followed bee so the target reads at a glance.
+  // Unlit (MeshBasicMaterial) so it stays bright regardless of scene lighting,
+  // and depth-write off so it haloes the bee without occluding it. One shared
+  // mesh, repositioned/scaled onto the target each render (see updateFollow).
+  private readonly highlightGeometry = new THREE.RingGeometry(10, 12.5, 36);
+  private readonly highlightMaterial = new THREE.MeshBasicMaterial({
+    color: 0xfff1c0,
+    transparent: true,
+    opacity: 0.92,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  private highlight?: THREE.Mesh;
 
   // Live scene objects keyed by stable entity id, reconciled each snapshot via
   // the shared {@link reconcileEntities} skeleton. Bees are multi-part `Group`s
@@ -219,9 +246,16 @@ export class WorldCanvas implements OnDestroy {
     sun.position.set(0.4, 0.6, 1);
     scene.add(sun);
 
+    // Pick bees on click via a ray cast through the orthographic frustum.
+    this.raycaster = new THREE.Raycaster();
+    this.highlight = new THREE.Mesh(this.highlightGeometry, this.highlightMaterial);
+    this.highlight.visible = false;
+    scene.add(this.highlight);
+
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(canvas);
     canvas.addEventListener('wheel', this.onWheel, { passive: false });
+    canvas.addEventListener('click', this.onClick);
 
     // Size the renderer to the canvas before the first draw, then render the
     // latest snapshot immediately if one already arrived.
@@ -261,6 +295,9 @@ export class WorldCanvas implements OnDestroy {
       () => new THREE.Mesh(this.flowerGeometry, this.flowerMaterial),
       (object, flower) => this.placeAt(object, flower.position),
     );
+
+    // Lock the camera/highlight onto the followed bee at its fresh position.
+    this.updateFollow();
 
     renderer.render(scene, camera);
   }
@@ -320,6 +357,8 @@ export class WorldCanvas implements OnDestroy {
    */
   private updateBee(group: THREE.Group, bee: BeeSnapshot): void {
     (group.userData['body'] as THREE.Mesh).material = this.beeMaterialFor(bee);
+    // Stamp the id so a click ray-hit on any body part resolves back to the bee.
+    group.userData['beeId'] = bee.id;
     this.placeAt(group, bee.position);
 
     const vx = bee.velocity?.x ?? 0;
@@ -428,10 +467,115 @@ export class WorldCanvas implements OnDestroy {
     camera.top = halfH;
     camera.bottom = -halfH;
     camera.zoom = this.zoom;
-    // Centre on the world; symmetric frustum keeps the world centred.
-    camera.position.x = this.worldWidth / 2;
-    camera.position.y = this.worldHeight / 2;
+    // Centre on the focus point — the followed bee, or the world centre when the
+    // follow-cam is free. With a symmetric frustum the focus point sits dead
+    // centre-frame, which is exactly what the follow-cam wants.
+    const focus = this.focusPoint();
+    camera.position.x = focus.x;
+    camera.position.y = focus.y;
     camera.updateProjectionMatrix();
+  }
+
+  /**
+   * Screen-space point to keep centre-frame: the followed bee's current
+   * position, or the world centre when nothing is followed (or the target has
+   * left the snapshot). Bee object positions are already in screen space (the
+   * world-`y` flip is baked in by {@link placeAt}), so they map straight through.
+   */
+  private focusPoint(): { x: number; y: number } {
+    const id = this.followedBeeId();
+    if (id !== null) {
+      const target = this.beeObjects.get(id);
+      if (target) {
+        return { x: target.position.x, y: target.position.y };
+      }
+    }
+    return { x: this.worldWidth / 2, y: this.worldHeight / 2 };
+  }
+
+  /**
+   * Keep the follow-cam glued to its target each render: move the highlight ring
+   * onto the bee and re-centre the camera on it. If the followed bee has left the
+   * snapshot (died, or reset away), release the follow so the camera frees up.
+   */
+  private updateFollow(): void {
+    const id = this.followedBeeId();
+    const target = id === null ? undefined : this.beeObjects.get(id);
+
+    if (id !== null && !target) {
+      this.clearFollow();
+      return;
+    }
+
+    if (this.highlight) {
+      if (target) {
+        this.highlight.visible = true;
+        // Match the bee's per-caste scale so the ring hugs queen and worker alike.
+        this.highlight.scale.setScalar(target.scale.x);
+        this.highlight.position.set(target.position.x, target.position.y, 0.4);
+      } else {
+        this.highlight.visible = false;
+      }
+    }
+
+    if (target) {
+      this.updateCamera();
+    }
+  }
+
+  /**
+   * Release the follow-cam: free the camera, hide the highlight, and re-frame the
+   * whole world. Called by the dock's clear button and when a click lands on
+   * empty space. No-op when already free so it stays idempotent.
+   */
+  clearFollow(): void {
+    if (this.followedBeeId() === null) {
+      return;
+    }
+    this.followedBeeId.set(null);
+    if (this.highlight) {
+      this.highlight.visible = false;
+    }
+    this.updateCamera();
+    this.renderCurrent();
+  }
+
+  /**
+   * Resolve a click to a bee and follow it (or release on empty space). Casts a
+   * ray through the orthographic frustum at the pointer and walks the nearest hit
+   * up to the owning bee `Group` via its stamped `beeId`.
+   */
+  private handleClick(event: MouseEvent): void {
+    const { camera, raycaster } = this;
+    if (!camera || !raycaster) {
+      return;
+    }
+    const canvas = this.canvas().nativeElement;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      return;
+    }
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects([...this.beeObjects.values()], true)[0];
+    // A hit follows that bee; a miss (empty space) releases the follow-cam.
+    this.followedBeeId.set(hit ? this.beeIdFor(hit.object) : null);
+  }
+
+  /** Walk an object up its ancestry to the owning bee `Group`'s stamped id. */
+  private beeIdFor(object: THREE.Object3D): number | null {
+    let node: THREE.Object3D | null = object;
+    while (node) {
+      const id = node.userData['beeId'];
+      if (typeof id === 'number') {
+        return id;
+      }
+      node = node.parent;
+    }
+    return null;
   }
 
   private handleResize(): void {
@@ -467,6 +611,7 @@ export class WorldCanvas implements OnDestroy {
   ngOnDestroy(): void {
     const canvas = this.canvas().nativeElement;
     canvas.removeEventListener('wheel', this.onWheel);
+    canvas.removeEventListener('click', this.onClick);
     this.resizeObserver?.disconnect();
 
     this.beeBodyGeometry.dispose();
@@ -484,6 +629,8 @@ export class WorldCanvas implements OnDestroy {
     this.hiveMaterial.dispose();
     this.queenGeometry.dispose();
     this.queenMaterial.dispose();
+    this.highlightGeometry.dispose();
+    this.highlightMaterial.dispose();
     this.renderer?.dispose();
   }
 }

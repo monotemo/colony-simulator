@@ -8,7 +8,7 @@ import {
 } from '@angular/core';
 import { WorldCanvas } from './world-canvas';
 import { SimulationService } from './simulation.service';
-import { BeeClass, BeeState } from './models';
+import { BeeClass, BeeSnapshot, BeeState } from './models';
 
 /** Tick-rate multipliers offered by the speed segmented control. */
 type Speed = 0.5 | 1 | 2;
@@ -39,6 +39,18 @@ const STATE_LABELS: readonly { state: BeeState; label: string }[] = [
   { state: 'flying', label: 'Flying' },
   { state: 'resting', label: 'Resting' },
 ];
+
+/** State key → label, for one-off lookups (e.g. the follow-cam chip). */
+const STATE_LABEL_BY_KEY = new Map<BeeState, string>(
+  STATE_LABELS.map((row) => [row.state, row.label]),
+);
+
+/** Human-readable caste names, for the follow-cam chip. */
+const CASTE_LABELS: Record<BeeClass, string> = {
+  queen: 'Queen',
+  worker: 'Worker',
+  drone: 'Drone',
+};
 
 /**
  * The "Hearth" dashboard: header bar, the live three.js world with a floating
@@ -156,6 +168,33 @@ export class App {
 
   readonly zoomPercent = computed(() => this.world()?.zoomPercent() ?? 100);
 
+  /** Id of the bee the follow-cam is locked onto, or `null` when free. */
+  readonly followedBeeId = computed(() => this.world()?.followedBeeId() ?? null);
+
+  /**
+   * The live snapshot of the followed bee, looked up fresh each tick so the dock
+   * chip tracks its changing state. `null` when nothing is followed or the bee
+   * has left the colony (the canvas releases the follow on the same tick).
+   */
+  readonly followedBee = computed<BeeSnapshot | null>(() => {
+    const id = this.followedBeeId();
+    if (id === null) {
+      return null;
+    }
+    return this.snapshot()?.bees.find((bee) => bee.id === id) ?? null;
+  });
+
+  /** Friendly "Caste · State" summary of the followed bee for the dock chip. */
+  readonly followLabel = computed(() => {
+    const bee = this.followedBee();
+    if (!bee) {
+      return '';
+    }
+    const caste = CASTE_LABELS[bee.beeClass] ?? bee.beeClass;
+    const state = STATE_LABEL_BY_KEY.get(bee.state) ?? bee.state;
+    return `${caste} · ${state}`;
+  });
+
   start(): void {
     this.sim.start();
   }
@@ -179,5 +218,10 @@ export class App {
 
   zoomOut(): void {
     this.world()?.zoomOut();
+  }
+
+  /** Release the follow-cam, re-framing the whole world. */
+  stopFollow(): void {
+    this.world()?.clearFollow();
   }
 }
