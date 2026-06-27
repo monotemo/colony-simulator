@@ -22,20 +22,39 @@ export interface Bounds {
 }
 
 /**
- * What a bee is currently doing. All three variants now exist in the Rust
- * `BeeState` enum, but the engine doesn't transition between them yet — every
- * bee sits in `wandering` until the behavior state machine lands, at which point
- * the UI breakdown lights up automatically.
+ * What a bee is currently doing — a flat superset of every caste's states,
+ * mirroring the Rust `BeeState` enum. Which states a bee actually visits is
+ * gated by its {@link BeeClass}: workers wander/forage/rest and build comb,
+ * the queen lays eggs (or rests), and drones loaf/fly (or rest).
  */
-export type BeeState = 'wandering' | 'foraging' | 'resting';
+export type BeeState =
+  | 'wandering'
+  | 'foraging'
+  | 'resting'
+  | 'building_comb'
+  | 'laying_eggs'
+  | 'loafing'
+  | 'flying';
+
+/** The caste a bee belongs to, mirroring the Rust `BeeClass` enum. */
+export type BeeClass = 'queen' | 'worker' | 'drone';
+
+/** Biological sex, derived from caste on the Rust side (drones male; queen and workers female). */
+export type Sex = 'male' | 'female';
 
 export interface BeeSnapshot {
   id: number;
   position: Vec3;
   velocity: Vec3;
+  /** The bee's caste (`class` is reserved in JS, so the wire key is `beeClass`). */
+  beeClass: BeeClass;
+  /** Biological sex, carried so the UI needn't re-derive it from the caste. */
+  sex: Sex;
   state: BeeState;
   /** Remaining energy as a fraction in `[0, 1]`; the engine reports it for every bee. */
   energy: number;
+  /** Wax scales secreted by this bee (workers only; `0` for other castes). */
+  waxScales: number;
 }
 
 export type ResourceKind = 'nectar';
@@ -54,6 +73,8 @@ export interface WorldSnapshot {
   resources: ResourceSnapshot[];
   /** Honey in store as a fraction in `[0, 1]`; the engine reports it each tick. */
   honeyStored: number;
+  /** Total comb wax the colony has produced, in grams (1000 secreted scales = 1 gram). */
+  waxGrams: number;
 }
 
 /**

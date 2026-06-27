@@ -119,6 +119,13 @@ mod tests {
                     BeeState::Wandering => wandering += 1,
                     BeeState::Foraging => foraging += 1,
                     BeeState::Resting => resting += 1,
+                    // The caste-specific states (worker build, queen laying,
+                    // drone loaf/flight) also exist now; this test only asserts
+                    // the worker forage/wander/rest mix lights up.
+                    BeeState::BuildingComb
+                    | BeeState::LayingEggs
+                    | BeeState::Loafing
+                    | BeeState::Flying => {}
                 }
             }
             saw_foraging |= foraging > 0;
@@ -140,6 +147,20 @@ mod tests {
             json.contains("\"honeyStored\""),
             "wire key should be camelCase honeyStored: {json}"
         );
+    }
+
+    #[test]
+    fn snapshot_serializes_caste_and_wax_wire_keys() {
+        // The new bee fields must reach the frontend under the agreed wire keys:
+        // multi-word fields camelCase, enum values snake_case. Guard them so the
+        // contract with `models.ts` can't silently drift.
+        let engine = Engine::seeded();
+        let json = serde_json::to_string(&engine.snapshot()).expect("serialize");
+        for key in ["\"beeClass\"", "\"sex\"", "\"waxScales\"", "\"waxGrams\""] {
+            assert!(json.contains(key), "wire should carry {key}: {json}");
+        }
+        // The seeded colony has a queen, so her caste must serialize snake_case.
+        assert!(json.contains("\"queen\""), "caste should be snake_case: {json}");
     }
 
     #[test]

@@ -120,8 +120,21 @@
           <span class="stat-cap">active bees</span>
         </div>
         <div class="chips">
-          <span class="chip"><i class="sw sw-queen"></i>1 Queen</span>
+          <span class="chip"><i class="sw sw-queen"></i>{{ queenCount() }} Queen</span>
           <span class="chip">1 Hive</span>
+        </div>
+      </div>
+
+      <!-- Castes -->
+      <div class="card">
+        <span class="eyebrow-label">Castes</span>
+        <div class="castes">
+          @for (row of castes(); track row.caste) {
+            <div class="caste">
+              <span class="mono caste-count">{{ row.count }}</span>
+              <span class="caste-label">{{ row.label }}</span>
+            </div>
+          }
         </div>
       </div>
 
@@ -180,6 +193,11 @@
             <div class="bar bar--md">
               <div class="bar-fill bar-fill--honey" [style.width.%]="honeyStored()"></div>
             </div>
+          </div>
+          <span class="resource-divider"></span>
+          <div class="resource-col">
+            <span class="mono resource-num">{{ waxScales().toFixed(1) }}</span>
+            <span class="stat-cap">Wax scales &middot; {{ waxGrams().toFixed(3) }} g</span>
           </div>
         </div>
       </div>
