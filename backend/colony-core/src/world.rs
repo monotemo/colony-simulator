@@ -180,25 +180,27 @@ impl World {
         id
     }
 
-    /// Build the default seeded starting world: 24 bees with deterministic,
+    /// Build the default seeded starting world: 500 bees with deterministic,
     /// varied velocities plus a few nectar sources. Deterministic so the
     /// initial state is reproducible without pulling in an RNG dependency. The
     /// colony is cast as exactly one queen, a few drones, and workers for the
-    /// rest (see [`class_for`]) — at 24 that is 1 queen, 3 drones, 20 workers.
+    /// rest (see [`class_for`]) — at 500 that is 1 queen, 83 drones, 416 workers.
     pub fn seeded() -> Self {
-        Self::seeded_with_count(24)
+        Self::seeded_with_count(500)
     }
 
     /// Build a seeded world with `bee_count` bees. The placement and velocity
     /// math is parameterized on `t = i / bee_count`, so the layout shape is
-    /// the same at any population — at `bee_count == 24` it is byte-identical
+    /// the same at any population — at `bee_count == 500` it is byte-identical
     /// to [`World::seeded`]. Exists so benchmarks and scale tests can stress
     /// arbitrary populations without an RNG; production still uses `seeded()`.
     pub fn seeded_with_count(bee_count: usize) -> Self {
-        // Depth is sized for the eventual flight volume; bees and resources are
-        // seeded flat at z = 0 until flight behavior lands, so visuals are
-        // unchanged while the third axis exists for real in the geometry.
-        let bounds = Bounds::new(800.0, 600.0, 400.0);
+        // A roomy box for a large colony: a 4000×4000 floor gives the swarm
+        // space to spread without packing into a wall, and the depth is sized
+        // for the eventual flight volume. Bees and resources are seeded flat at
+        // z = 0 until flight behavior lands, so the third axis exists for real
+        // in the geometry while visuals stay top-down for now.
+        let bounds = Bounds::new(4000.0, 4000.0, 1000.0);
         let mut world = World::empty(bounds);
 
         for i in 0..bee_count {
@@ -634,12 +636,12 @@ mod tests {
     }
 
     #[test]
-    fn seeded_matches_seeded_with_count_24() {
+    fn seeded_matches_seeded_with_count_500() {
         // `seeded()` must stay byte-identical to the parameterized builder at
         // its production population, so adding the benchmarking hook can't
         // silently perturb the default world.
         let default = World::seeded();
-        let explicit = World::seeded_with_count(24);
+        let explicit = World::seeded_with_count(500);
         assert_eq!(default.bees, explicit.bees);
         assert_eq!(default.resources, explicit.resources);
         assert_eq!(default.bounds, explicit.bounds);
@@ -808,13 +810,14 @@ mod tests {
     #[test]
     fn seeded_colony_is_one_queen_a_few_drones_and_workers() {
         // The default colony must cast exactly one queen, a few drones, and
-        // workers for the remainder — at 24 that is 1 / 3 / 20.
+        // workers for the remainder — at 500 that is 1 / 83 / 416 (bee 0 is the
+        // queen, every sixth bee after is a drone, the rest are workers).
         let world = World::seeded();
         let count = |class| world.bees.iter().filter(|b| b.class == class).count();
         assert_eq!(count(BeeClass::Queen), 1);
-        assert_eq!(count(BeeClass::Drone), 3);
-        assert_eq!(count(BeeClass::Worker), 20);
-        assert_eq!(world.bees.len(), 24);
+        assert_eq!(count(BeeClass::Drone), 83);
+        assert_eq!(count(BeeClass::Worker), 416);
+        assert_eq!(world.bees.len(), 500);
     }
 
     #[test]
