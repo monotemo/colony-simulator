@@ -5,7 +5,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bee::{Bee, BeeState};
+use crate::bee::{Bee, BeeClass, BeeState};
 use crate::entity::{EntityId, IdAllocator};
 use crate::math::Vec3;
 
@@ -58,6 +58,31 @@ const HONEY_HARVEST_PER_BEE_PER_SECOND: f64 = 0.02;
 /// only ever climbing — the level settles where harvest and consumption balance.
 const HONEY_CONSUMPTION_PER_SECOND: f64 = 0.01;
 
+/// Wax scales a building worker secretes per second. A worker makes roughly
+/// eight scales over a twelve-hour shift, so the rate is `8 / (12 · 3600)`
+/// scales/second — tiny per tick, but it adds up over a long build stint.
+const WAX_SCALES_PER_SECOND: f64 = 8.0 / (12.0 * 3600.0);
+
+/// Wax scales that make up a single gram of comb wax. The colony's wax total is
+/// tracked in grams, converted from the scales its workers secrete.
+const SCALES_PER_GRAM: f64 = 1000.0;
+
+/// Energy at or above which a wandering worker, with nothing more urgent to do,
+/// settles at the hive to secrete wax and build comb. Set above
+/// [`FORAGE_ENERGY_THRESHOLD`] so a hungry worker forages rather than builds.
+const BUILD_ENERGY_THRESHOLD: f64 = 0.7;
+
+/// Energy at which a building worker has spent enough and drifts back to
+/// wandering. Comfortably above the rest threshold, so an ordinary build stint
+/// ends by choice rather than by exhaustion.
+const BUILD_STOP_ENERGY: f64 = 0.5;
+
+/// Energy at or above which a loafing drone launches into an orientation flight.
+const DRONE_FLY_ENERGY: f64 = 0.8;
+
+/// Energy at which a flying drone gives up the flight and settles back to loaf.
+const DRONE_LAND_ENERGY: f64 = 0.4;
+
 /// The box-shaped extent of the world, in world units. The origin is the
 /// top-left-front corner; valid positions satisfy `0 <= x <= width`,
 /// `0 <= y <= height`, and `0 <= z <= depth`.
@@ -109,6 +134,11 @@ pub struct World {
     /// constant consumption, clamped to the range each tick. Surfaced on the
     /// snapshot as `honeyStored`.
     pub honey_stored: f64,
+    /// Total comb wax the colony has produced, in grams. Accumulated from the
+    /// scales its workers secrete while `BuildingComb` (1000 scales = 1 gram)
+    /// and summed in bee-index order each tick so the total is reproducible.
+    /// Monotonic — wax is built, never spent here. Surfaced as `waxGrams`.
+    pub wax_grams: f64,
     ids: IdAllocator,
     /// Reusable scratch for the per-tick separation broad phase. Holds no
     /// simulation state — it is cleared and rebuilt every [`World::step`] — so
@@ -125,15 +155,17 @@ impl World {
             bees: Vec::new(),
             resources: Vec::new(),
             honey_stored: 0.0,
+            wax_grams: 0.0,
             ids: IdAllocator::new(),
             grid: SpatialGrid::default(),
         }
     }
 
-    /// Spawn a bee at `position` with `velocity`, allocating it a fresh id.
-    pub fn spawn_bee(&mut self, position: Vec3, velocity: Vec3) -> EntityId {
+    /// Spawn a bee of `class` at `position` with `velocity`, allocating it a
+    /// fresh id.
+    pub fn spawn_bee(&mut self, position: Vec3, velocity: Vec3, class: BeeClass) -> EntityId {
         let id = self.ids.alloc();
-        self.bees.push(Bee::new(id, position, velocity));
+        self.bees.push(Bee::new(id, position, velocity, class));
         id
     }
 
@@ -150,7 +182,9 @@ impl World {
 
     /// Build the default seeded starting world: 24 bees with deterministic,
     /// varied velocities plus a few nectar sources. Deterministic so the
-    /// initial state is reproducible without pulling in an RNG dependency.
+    /// initial state is reproducible without pulling in an RNG dependency. The
+    /// colony is cast as exactly one queen, a few drones, and workers for the
+    /// rest (see [`class_for`]) — at 24 that is 1 queen, 3 drones, 20 workers.
     pub fn seeded() -> Self {
         Self::seeded_with_count(24)
     }
@@ -179,7 +213,7 @@ impl World {
             let angle = t * std::f64::consts::TAU * 3.0;
             let speed = 60.0 * fract(t + 0.5);
             let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
-            world.spawn_bee(position, velocity);
+            world.spawn_bee(position, velocity, class_for(i));
 
             // Stagger starting energy across the colony. Identical full reserves
             // would drain in lockstep, so every bee would hit the rest threshold
@@ -218,18 +252,33 @@ impl World {
         // then the integration loop mutates `self.bees` while reading the
         // returned slice, `self.resources`, and `self.bounds`.
         let accelerations = self.grid.separation_accelerations(&self.bees);
-        // Honey harvested across the colony this tick, summed in bee-index order
-        // into a local before it touches the store, so the total is reproducible.
+        // Honey harvested and wax scales secreted across the colony this tick,
+        // each summed in bee-index order into a local before it touches a store,
+        // so both totals are reproducible regardless of how floats land.
         let mut harvested = 0.0;
+        let mut wax_produced = 0.0;
         for (bee, &separation) in self.bees.iter_mut().zip(accelerations) {
-            // Foraging overlay: a hungry bee peels off to seek the nearest
-            // nectar and refuels on arrival, contributing a seek force folded in
-            // alongside separation and any honey it harvests while feeding. It
-            // reads only this bee and the immutable resources — never other bees
-            // — so it can't perturb the separation pass's ordering and
-            // determinism is preserved.
-            let (seek, honey) = forage(bee, &self.resources, dt);
+            // Per-caste decision process, dispatched on the bee's class. Each
+            // arm reads only this bee and the immutable resources — never other
+            // bees — so it can't perturb the separation pass's ordering and
+            // determinism is preserved. It yields a steering seek to fold in
+            // alongside separation, plus any honey/wax it produced this tick.
+            let (seek, honey, scales) = match bee.class {
+                BeeClass::Worker => {
+                    // A hungry worker forages; an idle, well-fed one builds comb.
+                    // Foraging is checked first so food always wins over wax.
+                    let (seek, honey) = forage(bee, &self.resources, dt);
+                    let scales = build_comb(bee, dt);
+                    (seek, honey, scales)
+                }
+                BeeClass::Drone => (drone_behavior(bee), 0.0, 0.0),
+                // The queen tends the brood at the hive; her laying/rest cycle is
+                // driven entirely by the energy machine in `Bee::step`, and she
+                // neither forages nor builds, so she contributes no steering.
+                BeeClass::Queen => (Vec3::ZERO, 0.0, 0.0),
+            };
             harvested += honey;
+            wax_produced += scales;
 
             let mut velocity = bee.velocity.add(separation.add(seek).scale(dt));
             let speed_squared = velocity.length_squared();
@@ -244,6 +293,9 @@ impl World {
         // consumption draw it down, clamped to [0, 1].
         self.honey_stored =
             (self.honey_stored + harvested - HONEY_CONSUMPTION_PER_SECOND * dt).clamp(0.0, 1.0);
+        // Bank this tick's wax. The store is monotonic — wax is built, not
+        // consumed — so it simply accumulates in grams.
+        self.wax_grams += wax_produced / SCALES_PER_GRAM;
     }
 
     /// Separation accelerations for every bee, in bee order — a test-facing
@@ -431,6 +483,76 @@ fn forage(bee: &mut Bee, resources: &[Resource], dt: f64) -> (Vec3, f64) {
     (seek, harvested)
 }
 
+/// Wax-building behavior for a single worker, run each tick after [`forage`].
+///
+/// Drives the entry and exit of [`BeeState::BuildingComb`] and returns the wax
+/// scales the worker secretes this tick (zero unless it is building). A
+/// well-fed worker that isn't foraging settles at the hive to build comb; it
+/// keeps secreting until it has spent enough energy ([`BUILD_STOP_ENERGY`]) and
+/// drifts back to wandering, or until the energy machine drops it to `Resting`.
+///
+/// Reads and writes only `bee`, never other bees or the world, so it is
+/// order-independent and leaves the engine's determinism intact. Wax production
+/// is gated on the caste here too: a non-worker never enters the build state, so
+/// only workers ever return a non-zero amount.
+fn build_comb(bee: &mut Bee, dt: f64) -> f64 {
+    if bee.class != BeeClass::Worker {
+        return 0.0;
+    }
+
+    // A well-fed wanderer with no foraging to do commits to building comb.
+    if bee.state == BeeState::Wandering && bee.energy >= BUILD_ENERGY_THRESHOLD {
+        bee.state = BeeState::BuildingComb;
+    }
+
+    if bee.state != BeeState::BuildingComb {
+        return 0.0;
+    }
+
+    // Spent enough on this stint: drift back out to wander (the build drain in
+    // `step_energy_and_state` is what brought it down to here).
+    if bee.energy <= BUILD_STOP_ENERGY {
+        bee.state = BeeState::Wandering;
+        return 0.0;
+    }
+
+    let scales = WAX_SCALES_PER_SECOND * dt;
+    bee.wax_scales += scales;
+    scales
+}
+
+/// Loafing/flight behavior for a single drone, run each tick before integration.
+///
+/// Drones neither forage nor build; they idle near the hive and take the
+/// occasional orientation flight. A rested drone launches into [`BeeState::Flying`]
+/// once well-fed ([`DRONE_FLY_ENERGY`]) and settles back to [`BeeState::Loafing`]
+/// when the flight has worn it down ([`DRONE_LAND_ENERGY`]); the energy machine
+/// drops either state to `Resting` if it bottoms out. Returns no steering force —
+/// a drone coasts on its existing velocity and the separation push — and reads
+/// only `bee`, so it stays order-independent and deterministic.
+fn drone_behavior(bee: &mut Bee) -> Vec3 {
+    match bee.state {
+        BeeState::Loafing if bee.energy >= DRONE_FLY_ENERGY => bee.state = BeeState::Flying,
+        BeeState::Flying if bee.energy <= DRONE_LAND_ENERGY => bee.state = BeeState::Loafing,
+        _ => {}
+    }
+    Vec3::ZERO
+}
+
+/// The caste of the `i`-th seeded bee. Deterministic and index-based (no RNG):
+/// bee 0 is the colony's sole queen, every sixth bee after that is a drone, and
+/// the rest are workers — a queen-led colony that is mostly workers with a few
+/// drones, matching real hive composition.
+fn class_for(i: usize) -> BeeClass {
+    if i == 0 {
+        BeeClass::Queen
+    } else if i.is_multiple_of(6) {
+        BeeClass::Drone
+    } else {
+        BeeClass::Worker
+    }
+}
+
 /// The position of the nectar source nearest `position`, with its squared
 /// distance, or `None` when there is no nectar. Ties on distance are broken by
 /// the lower slice index — and since resources are pushed in id order, that is
@@ -504,8 +626,8 @@ mod tests {
     #[test]
     fn spawn_assigns_unique_ids() {
         let mut world = World::empty(Bounds::new(100.0, 100.0, 100.0));
-        let a = world.spawn_bee(Vec3::ZERO, Vec3::ZERO);
-        let b = world.spawn_bee(Vec3::ZERO, Vec3::ZERO);
+        let a = world.spawn_bee(Vec3::ZERO, Vec3::ZERO, BeeClass::Worker);
+        let b = world.spawn_bee(Vec3::ZERO, Vec3::ZERO, BeeClass::Worker);
         let r = world.add_resource(Vec3::ZERO, ResourceKind::Nectar);
         assert_ne!(a, b);
         assert_ne!(b, r);
@@ -553,7 +675,7 @@ mod tests {
     fn lone_bee_has_zero_separation() {
         // Nothing to avoid, so no steering force.
         let mut world = World::empty(Bounds::new(100.0, 100.0, 100.0));
-        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
+        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO, BeeClass::Worker);
         assert_eq!(world.separation_accelerations(), vec![Vec3::ZERO]);
     }
 
@@ -562,8 +684,8 @@ mod tests {
         // Two stationary bees well inside the separation radius should be
         // pushed further apart after a step.
         let mut world = World::empty(Bounds::new(100.0, 100.0, 100.0));
-        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
-        world.spawn_bee(Vec3::new(54.0, 50.0, 0.0), Vec3::ZERO);
+        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO, BeeClass::Worker);
+        world.spawn_bee(Vec3::new(54.0, 50.0, 0.0), Vec3::ZERO, BeeClass::Worker);
         let before = world.bees[0].position.distance_squared(world.bees[1].position);
         world.step(1.0 / 30.0);
         let after = world.bees[0].position.distance_squared(world.bees[1].position);
@@ -574,8 +696,8 @@ mod tests {
     fn separation_is_equal_opposite_and_order_independent() {
         // A close pair pushes with equal and opposite force...
         let mut world = World::empty(Bounds::new(100.0, 100.0, 100.0));
-        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
-        world.spawn_bee(Vec3::new(55.0, 52.0, 0.0), Vec3::ZERO);
+        world.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO, BeeClass::Worker);
+        world.spawn_bee(Vec3::new(55.0, 52.0, 0.0), Vec3::ZERO, BeeClass::Worker);
         let accel = world.separation_accelerations();
         assert_eq!(accel[0], accel[1].scale(-1.0));
         assert_ne!(accel[0], Vec3::ZERO);
@@ -583,8 +705,8 @@ mod tests {
         // ...and swapping storage order just swaps the results: the force a bee
         // feels doesn't depend on where it sits in the Vec.
         let mut swapped = World::empty(Bounds::new(100.0, 100.0, 100.0));
-        swapped.spawn_bee(Vec3::new(55.0, 52.0, 0.0), Vec3::ZERO);
-        swapped.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO);
+        swapped.spawn_bee(Vec3::new(55.0, 52.0, 0.0), Vec3::ZERO, BeeClass::Worker);
+        swapped.spawn_bee(Vec3::new(50.0, 50.0, 0.0), Vec3::ZERO, BeeClass::Worker);
         let swapped_accel = swapped.separation_accelerations();
         assert_eq!(accel[0], swapped_accel[1]);
         assert_eq!(accel[1], swapped_accel[0]);
@@ -596,7 +718,7 @@ mod tests {
         let flower = Vec3::new(200.0, 200.0, 0.0);
         world.add_resource(flower, ResourceKind::Nectar);
         // A hungry bee a little way off, drifting nowhere in particular.
-        world.spawn_bee(Vec3::new(120.0, 200.0, 0.0), Vec3::ZERO);
+        world.spawn_bee(Vec3::new(120.0, 200.0, 0.0), Vec3::ZERO, BeeClass::Worker);
         world.bees[0].energy = FORAGE_ENERGY_THRESHOLD;
 
         // With nectar present and energy at the threshold, the first step commits
@@ -680,6 +802,93 @@ mod tests {
             assert!(bee.position.x >= 0.0 && bee.position.x <= world.bounds.width);
             assert!(bee.position.y >= 0.0 && bee.position.y <= world.bounds.height);
             assert!(bee.position.z >= 0.0 && bee.position.z <= world.bounds.depth);
+        }
+    }
+
+    #[test]
+    fn seeded_colony_is_one_queen_a_few_drones_and_workers() {
+        // The default colony must cast exactly one queen, a few drones, and
+        // workers for the remainder — at 24 that is 1 / 3 / 20.
+        let world = World::seeded();
+        let count = |class| world.bees.iter().filter(|b| b.class == class).count();
+        assert_eq!(count(BeeClass::Queen), 1);
+        assert_eq!(count(BeeClass::Drone), 3);
+        assert_eq!(count(BeeClass::Worker), 20);
+        assert_eq!(world.bees.len(), 24);
+    }
+
+    #[test]
+    fn building_worker_secretes_wax_at_the_expected_rate() {
+        // A worker held in the build state accrues scales at the per-second rate.
+        let dt = 1.0 / 30.0;
+        let mut bee = Bee::new(EntityId(0), Vec3::ZERO, Vec3::ZERO, BeeClass::Worker);
+        bee.state = BeeState::BuildingComb;
+        bee.energy = 1.0; // well above BUILD_STOP_ENERGY, so it keeps building.
+
+        let steps = 300;
+        let mut produced = 0.0;
+        for _ in 0..steps {
+            produced += build_comb(&mut bee, dt);
+        }
+        let expected = WAX_SCALES_PER_SECOND * dt * steps as f64;
+        assert!((bee.wax_scales - expected).abs() < 1e-12);
+        assert!((produced - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn only_workers_ever_secrete_wax() {
+        let dt = 1.0 / 30.0;
+        for class in [BeeClass::Queen, BeeClass::Drone] {
+            let mut bee = Bee::new(EntityId(0), Vec3::ZERO, Vec3::ZERO, class);
+            // Even if forced into the build state, a non-worker produces nothing.
+            bee.state = BeeState::BuildingComb;
+            bee.energy = 1.0;
+            assert_eq!(build_comb(&mut bee, dt), 0.0);
+            assert_eq!(bee.wax_scales, 0.0);
+        }
+    }
+
+    #[test]
+    fn colony_banks_wax_grams_from_worker_scales() {
+        // Over a run the workers build comb, so the colony's gram total climbs,
+        // and it matches the sum of every bee's scales divided by 1000.
+        let mut world = World::seeded();
+        assert_eq!(world.wax_grams, 0.0);
+        for _ in 0..3_000 {
+            world.step(1.0 / 30.0);
+        }
+        assert!(world.wax_grams > 0.0, "workers building comb should bank wax");
+
+        let total_scales: f64 = world.bees.iter().map(|b| b.wax_scales).sum();
+        assert!((world.wax_grams - total_scales / SCALES_PER_GRAM).abs() < 1e-9);
+    }
+
+    #[test]
+    fn each_caste_stays_within_its_own_states() {
+        // The flat state enum lets an out-of-caste pair be represented, but the
+        // per-caste decision processes must never produce one over a long run.
+        let mut world = World::seeded();
+        for _ in 0..5_000 {
+            world.step(1.0 / 30.0);
+            for bee in &world.bees {
+                let allowed = match bee.class {
+                    BeeClass::Worker => matches!(
+                        bee.state,
+                        BeeState::Wandering
+                            | BeeState::Foraging
+                            | BeeState::Resting
+                            | BeeState::BuildingComb
+                    ),
+                    BeeClass::Queen => {
+                        matches!(bee.state, BeeState::LayingEggs | BeeState::Resting)
+                    }
+                    BeeClass::Drone => matches!(
+                        bee.state,
+                        BeeState::Loafing | BeeState::Flying | BeeState::Resting
+                    ),
+                };
+                assert!(allowed, "{:?} reached invalid state {:?}", bee.class, bee.state);
+            }
         }
     }
 }

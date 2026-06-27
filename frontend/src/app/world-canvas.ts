@@ -11,7 +11,7 @@ import {
 } from '@angular/core';
 import * as THREE from 'three';
 import { SimulationService } from './simulation.service';
-import { BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
+import { BeeClass, BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
 
 /**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
@@ -74,12 +74,26 @@ export class WorldCanvas implements OnDestroy {
   private readonly beeStripeGeometry = new THREE.ShapeGeometry(this.ellipse(1.1, 4.6), 16);
   private readonly beeWingGeometry = new THREE.ShapeGeometry(this.ellipse(3.6, 6), 20);
   private readonly beeHeadGeometry = new THREE.CircleGeometry(3, 16);
-  // Body tinted by behavior state (wandering gold / foraging sage / resting
-  // dim); the emissive lift gives the soft "glow" the design calls for.
+  // Body tinted by behavior state; the emissive lift gives the soft "glow" the
+  // design calls for. Each caste mostly occupies its own states, so the state
+  // tints double as caste cues: amber wax for a building worker, royal gold for
+  // the laying queen, a muted brown for a loafing drone. Combined with the
+  // per-caste scale (see {@link classScale}), castes read at a glance.
   private readonly beeMaterials: Record<BeeState, THREE.MeshStandardMaterial> = {
     wandering: this.glowMaterial(0xe2a12b, 0xf3b84a, 0.45),
     foraging: this.glowMaterial(0x7c8b5a, 0x9aae6e, 0.35),
     resting: this.glowMaterial(0xc99a38, 0xc99a38, 0.12),
+    building_comb: this.glowMaterial(0xe6c34a, 0xf2d873, 0.4),
+    laying_eggs: this.glowMaterial(0xe0a12b, 0xffe08a, 0.7),
+    loafing: this.glowMaterial(0x9a8050, 0xb39863, 0.2),
+    flying: this.glowMaterial(0xcdb06a, 0xe7cf8a, 0.4),
+  };
+  // Per-caste body scale, so a queen looms over her workers and drones sit a
+  // notch larger — size carries the caste even when two share a state colour.
+  private readonly classScale: Record<BeeClass, number> = {
+    queen: 1.7,
+    drone: 1.25,
+    worker: 1.0,
   };
   // Near-black bands for the head and abdomen stripes — the bee's contrast.
   private readonly beeMarkingMaterial = this.glowMaterial(0x2a1c08, 0x3a2a10, 0.1);
@@ -238,7 +252,7 @@ export class WorldCanvas implements OnDestroy {
     this.reconcileEntities(
       this.beeObjects,
       snapshot.bees,
-      (bee) => this.createBee(this.beeMaterialFor(bee)),
+      (bee) => this.createBee(this.beeMaterialFor(bee), bee.beeClass),
       (object, bee) => this.updateBee(object as THREE.Group, bee),
     );
     this.reconcileEntities(
@@ -323,8 +337,10 @@ export class WorldCanvas implements OnDestroy {
    * state without rebuilding the group. The bee is modelled pointing along `+x`
    * and rotated about `z` to face its velocity (see {@link updateBee}).
    */
-  private createBee(material: THREE.Material): THREE.Group {
+  private createBee(material: THREE.Material, beeClass: BeeClass): THREE.Group {
     const bee = new THREE.Group();
+    // Caste never changes, so scale once here rather than every snapshot.
+    bee.scale.setScalar(this.classScale[beeClass] ?? 1);
 
     const body = new THREE.Mesh(this.beeBodyGeometry, material);
     bee.add(body);

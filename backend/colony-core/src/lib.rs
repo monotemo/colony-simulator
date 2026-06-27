@@ -12,7 +12,7 @@ pub mod math;
 pub mod snapshot;
 pub mod world;
 
-pub use bee::{Bee, BeeState};
+pub use bee::{Bee, BeeClass, BeeState, Sex};
 pub use engine::Engine;
 pub use entity::EntityId;
 pub use math::Vec3;

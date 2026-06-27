@@ -415,6 +415,31 @@ $track: #eee3cb;
   color: #8a6e2e;
 }
 
+/* Castes */
+.castes {
+  display: flex;
+  gap: 12px;
+}
+
+.caste {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.caste-count {
+  font-size: 22px;
+  font-weight: 600;
+  color: $ink-2;
+  line-height: 1;
+}
+
+.caste-label {
+  font: 500 12px "Hanken Grotesk", sans-serif;
+  color: $muted;
+}
+
 /* Bars */
 .bar {
   height: 5px;
@@ -454,6 +479,22 @@ $track: #eee3cb;
 
 .bar-fill--resting {
   background: #b07a4a;
+}
+
+.bar-fill--building_comb {
+  background: #e6c34a;
+}
+
+.bar-fill--laying_eggs {
+  background: #e0a12b;
+}
+
+.bar-fill--loafing {
+  background: #9a8050;
+}
+
+.bar-fill--flying {
+  background: #cdb06a;
 }
 
 /* Behavior */
@@ -507,6 +548,22 @@ $track: #eee3cb;
 
 .dot--resting {
   background: #b07a4a;
+}
+
+.dot--building_comb {
+  background: #e6c34a;
+}
+
+.dot--laying_eggs {
+  background: #e0a12b;
+}
+
+.dot--loafing {
+  background: #9a8050;
+}
+
+.dot--flying {
+  background: #cdb06a;
 }
 
 .behavior-label {
