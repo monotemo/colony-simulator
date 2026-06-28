@@ -52,6 +52,14 @@ export class WebSocketSimulationService extends SimulationService {
     }
   }
 
+  spawnBee(x: number, y: number): void {
+    void this.control({ spawn_bee: { x, y } });
+  }
+
+  addNectar(x: number, y: number): void {
+    void this.control({ add_nectar: { x, y } });
+  }
+
   private async control(command: ControlCommand): Promise<void> {
     await fetch('/api/control', {
       method: 'POST',

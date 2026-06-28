@@ -6,7 +6,7 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
-import { WorldCanvas } from './world-canvas';
+import { PointerTool, WorldCanvas } from './world-canvas';
 import { SimulationService } from './simulation.service';
 import { BeeClass, BeeSnapshot, BeeState } from './models';
 
@@ -168,6 +168,9 @@ export class App {
 
   readonly zoomPercent = computed(() => this.world()?.zoomPercent() ?? 100);
 
+  /** Active pointer tool, mirrored from the canvas for the dock's button state. */
+  readonly tool = computed<PointerTool>(() => this.world()?.tool() ?? 'follow');
+
   /** Id of the bee the follow-cam is locked onto, or `null` when free. */
   readonly followedBeeId = computed(() => this.world()?.followedBeeId() ?? null);
 
@@ -205,6 +208,19 @@ export class App {
 
   reset(): void {
     this.sim.reset();
+  }
+
+  /**
+   * Toggle a placement tool on the canvas: clicking the active tool's button
+   * again returns to the follow-cam. Clicks on the world then drop a bee or
+   * nectar source instead of following bees.
+   */
+  toggleTool(tool: Exclude<PointerTool, 'follow'>): void {
+    const world = this.world();
+    if (!world) {
+      return;
+    }
+    world.setTool(world.tool() === tool ? 'follow' : tool);
   }
 
   setSpeed(speed: Speed): void {

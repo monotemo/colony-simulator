@@ -14,6 +14,13 @@ import { SimulationService } from './simulation.service';
 import { BeeClass, BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
 
 /**
+ * What a click on the world does: follow a bee (the default), or place a new
+ * entity at the clicked point. The placement tools drive the interactive
+ * world-perturbation controls.
+ */
+export type PointerTool = 'follow' | 'spawnBee' | 'addNectar';
+
+/**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
  * as small striped, winged shapes tinted by behavior state and turned to face
  * their heading, nectar resources as terracotta discs, and a central hive with
@@ -60,6 +67,15 @@ export class WorldCanvas implements OnDestroy {
   readonly zoomPercent = signal(100);
 
   /**
+   * The active pointer tool. In `follow` mode a click locks the follow-cam onto
+   * a bee (or releases it on empty space); in a placement mode a click drops a
+   * new bee or nectar source at the clicked world point instead. The dashboard
+   * dock toggles this (see {@link setTool}) and reads it to light the active
+   * button.
+   */
+  readonly tool = signal<PointerTool>('follow');
+
+  /**
    * Stable id of the bee the follow-cam is locked onto, or `null` when the
    * camera is free and framing the whole world. Clicking a bee sets it; clicking
    * empty space (or the dock's clear button) releases it. It is a signal so the
@@ -74,6 +90,9 @@ export class WorldCanvas implements OnDestroy {
   private camera?: THREE.OrthographicCamera;
   private resizeObserver?: ResizeObserver;
   private raycaster?: THREE.Raycaster;
+  // The world floor (`z = 0`) as a math plane, for mapping a click back to a
+  // world-space point when a placement tool is active. Reused across clicks.
+  private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
   private readonly onWheel = (event: WheelEvent) => this.handleWheel(event);
   private readonly onClick = (event: MouseEvent) => this.handleClick(event);
 
@@ -541,28 +560,82 @@ export class WorldCanvas implements OnDestroy {
   }
 
   /**
-   * Resolve a click to a bee and follow it (or release on empty space). Casts a
-   * ray through the orthographic frustum at the pointer and walks the nearest hit
-   * up to the owning bee `Group` via its stamped `beeId`.
+   * Select the active pointer tool. The dashboard dock calls this to switch
+   * between following bees and placing new entities; switching away from
+   * `follow` keeps any current follow lock until the next click resolves it.
+   */
+  setTool(tool: PointerTool): void {
+    this.tool.set(tool);
+    // A crosshair while placing signals the click will drop something.
+    this.canvas().nativeElement.style.cursor =
+      tool === 'follow' ? 'pointer' : 'crosshair';
+  }
+
+  /**
+   * Handle a click. In a placement tool, drop a bee/nectar at the clicked world
+   * point via the simulation service. Otherwise resolve to a bee and follow it
+   * (or release on empty space) by casting a ray through the orthographic
+   * frustum and walking the nearest hit up to its owning bee `Group`.
    */
   private handleClick(event: MouseEvent): void {
     const { camera, raycaster } = this;
     if (!camera || !raycaster) {
       return;
     }
-    const canvas = this.canvas().nativeElement;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
+    const ndc = this.pointerNdc(event);
+    if (!ndc) {
       return;
     }
-    const ndc = new THREE.Vector2(
-      ((event.clientX - rect.left) / rect.width) * 2 - 1,
-      -((event.clientY - rect.top) / rect.height) * 2 + 1,
-    );
     raycaster.setFromCamera(ndc, camera);
+
+    const tool = this.tool();
+    if (tool !== 'follow') {
+      const point = this.worldPointFromRay();
+      if (point) {
+        if (tool === 'spawnBee') {
+          this.sim.spawnBee(point.x, point.y);
+        } else {
+          this.sim.addNectar(point.x, point.y);
+        }
+      }
+      return;
+    }
+
     const hit = raycaster.intersectObjects([...this.beeObjects.values()], true)[0];
     // A hit follows that bee; a miss (empty space) releases the follow-cam.
     this.followedBeeId.set(hit ? this.beeIdFor(hit.object) : null);
+  }
+
+  /**
+   * Normalised device coordinates for a pointer event, or `null` if the canvas
+   * has no size yet. The screen→NDC mapping the raycaster expects.
+   */
+  private pointerNdc(event: MouseEvent): THREE.Vector2 | null {
+    const rect = this.canvas().nativeElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      return null;
+    }
+    return new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+  }
+
+  /**
+   * The world-space point under the current ray, found by intersecting the
+   * `z = 0` floor plane and inverting the screen-`y` flip {@link placeAt} bakes
+   * in (scene-y = `worldHeight − world-y`). Clamped into bounds so a click on
+   * the letterbox margin still lands on the floor. `null` if the ray misses.
+   */
+  private worldPointFromRay(): { x: number; y: number } | null {
+    const point = new THREE.Vector3();
+    if (!this.raycaster!.ray.intersectPlane(this.groundPlane, point)) {
+      return null;
+    }
+    return {
+      x: Math.min(this.worldWidth, Math.max(0, point.x)),
+      y: Math.min(this.worldHeight, Math.max(0, this.worldHeight - point.y)),
+    };
   }
 
   /** Walk an object up its ancestry to the owning bee `Group`'s stamped id. */

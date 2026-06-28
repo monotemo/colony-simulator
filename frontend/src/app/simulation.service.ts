@@ -28,8 +28,20 @@ export abstract class SimulationService {
   abstract start(): void;
   /** Pause the simulation in place. */
   abstract pause(): void;
-  /** Reset to a fresh seeded world. */
+  /**
+   * Reshuffle into a fresh colony. The engine is no longer deterministic, so
+   * this reseeds from entropy rather than replaying a fixed starting world.
+   */
   abstract reset(): void;
+
+  /**
+   * Spawn a worker at a world-space point — the interactive "add a bee"
+   * perturbation. Both transports implement it (the WebSocket forwards a control
+   * command; the wasm engine calls straight through).
+   */
+  abstract spawnBee(x: number, y: number): void;
+  /** Drop a nectar source at a world-space point — interactive "add nectar". */
+  abstract addNectar(x: number, y: number): void;
 
   /**
    * Set the tick-rate multiplier (e.g. `0.5`, `1`, `2`). Both transports honour

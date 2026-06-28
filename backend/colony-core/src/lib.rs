@@ -9,6 +9,7 @@ pub mod bee;
 pub mod engine;
 pub mod entity;
 pub mod math;
+pub mod rng;
 pub mod snapshot;
 pub mod world;
 

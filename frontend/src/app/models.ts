@@ -80,6 +80,13 @@ export interface WorldSnapshot {
 /**
  * Control commands accepted by `POST /api/control`, mirroring
  * `colony_server::sim::Command` (serde externally tagged): the simple commands
- * are bare strings, while `set_speed` carries its tick-rate multiplier.
+ * are bare strings, while the structured ones carry a payload — `set_speed` a
+ * tick-rate multiplier, and the world-perturbation commands a world-space point.
  */
-export type ControlCommand = 'start' | 'pause' | 'reset' | { set_speed: number };
+export type ControlCommand =
+  | 'start'
+  | 'pause'
+  | 'reset'
+  | { set_speed: number }
+  | { spawn_bee: { x: number; y: number } }
+  | { add_nectar: { x: number; y: number } };
