@@ -1,14 +1,17 @@
 import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
 import { SimulationService } from './simulation.service';
 import { ControlCommand, WorldSnapshot } from './models';
+import { environment } from '../environments/environment';
 
 /**
  * Streams the latest {@link WorldSnapshot} from the Rust server over a
  * WebSocket and sends control commands over REST.
  *
- * URLs are derived from the page origin, so the same build works both behind
- * the Angular dev-server proxy and when served as static files by the Rust
- * server. Used for local development against `colony-server`.
+ * URLs come from `environment.backendUrl`: when empty (dev) they resolve to the
+ * page origin, so the same build works behind the Angular dev-server proxy and
+ * when served as static files by the Rust server; when set (production on
+ * GitHub Pages) they point at the colony-server deployed on Fly.io, which the
+ * server allows via its permissive CORS layer.
  */
 @Injectable({ providedIn: 'root' })
 export class WebSocketSimulationService extends SimulationService {
@@ -60,8 +63,21 @@ export class WebSocketSimulationService extends SimulationService {
     void this.control({ add_nectar: { x, y } });
   }
 
+  /**
+   * The `/ws` endpoint URL. Derived from `environment.backendUrl` when set
+   * (swapping the http(s) scheme for ws(s)), otherwise from the page origin so
+   * dev keeps working through the proxy.
+   */
+  private socketUrl(): string {
+    if (environment.backendUrl) {
+      return `${environment.backendUrl.replace(/^http/, 'ws')}/ws`;
+    }
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}/ws`;
+  }
+
   private async control(command: ControlCommand): Promise<void> {
-    await fetch('/api/control', {
+    await fetch(`${environment.backendUrl}/api/control`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ command }),
@@ -69,9 +85,7 @@ export class WebSocketSimulationService extends SimulationService {
   }
 
   private connect(): void {
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${window.location.host}/ws`;
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(this.socketUrl());
     this.socket = socket;
 
     socket.onopen = () => this.zone.run(() => this.connected.set(true));
