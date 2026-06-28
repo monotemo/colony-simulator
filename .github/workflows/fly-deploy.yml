@@ -1,0 +1,41 @@
+name: Deploy backend to Fly
+
+# Deploy the colony-server (Axum) backend to Fly.io. Runs on pushes to main that
+# touch the backend or its deploy config, and can always be triggered by hand.
+# Requires a FLY_API_TOKEN repository secret (a Fly deploy token).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'Dockerfile'
+      - 'fly.toml'
+      - '.dockerignore'
+      - '.github/workflows/fly-deploy.yml'
+  workflow_dispatch:
+
+# Never run two deploys at once; let an in-flight deploy finish rather than
+# cancelling it midway.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy colony-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # --remote-only builds the image on Fly's builders, so the runner needs no
+      # local Docker. fly.toml supplies the app name, region, and Dockerfile.
+      - name: Deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

@@ -1,0 +1,10 @@
+# Only the Rust backend is built into the image — keep the build context small
+# and free of artifacts that would bust the layer cache on the remote builder.
+.git
+.github
+.claude
+frontend
+**/node_modules
+**/target
+dist
+*.md
