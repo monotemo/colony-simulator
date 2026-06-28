@@ -8,7 +8,8 @@
 //! A `watch` channel is the right tool for the outbound side: clients only ever
 //! want the most recent frame, not a backlog of every historical tick.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use colony_core::{Engine, WorldSnapshot};
 use serde::Deserialize;
@@ -16,6 +17,23 @@ use tokio::sync::{mpsc, watch};
 
 /// Simulation ticks per second.
 const TICK_HZ: f64 = 30.0;
+
+/// Draw a fresh entropy seed for a new or reshuffled colony. The engine itself
+/// stays pure (no clock, no RNG of its own); entropy enters only here, at the
+/// host boundary, so each launch and each reset yields a different colony while
+/// the core remains reproducible given whatever seed we hand it.
+///
+/// We mix the wall clock with a process-lifetime counter so two resets landing
+/// in the same nanosecond (or a coarse clock) still produce distinct seeds.
+fn entropy_seed() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17)
+}
 
 /// A control command sent to the simulation task.
 ///
@@ -36,6 +54,12 @@ pub enum Command {
     /// The step `dt` stays fixed for stable physics; only how often we step
     /// changes, so the simulation's apparent speed scales with it.
     SetSpeed(f64),
+    /// Spawn a worker at a world-space point — the interactive "add a bee"
+    /// perturbation. Encodes as `{ "spawn_bee": { "x": .., "y": .. } }`.
+    SpawnBee { x: f64, y: f64 },
+    /// Drop a nectar source at a world-space point — the interactive "add
+    /// nectar" perturbation. Encodes as `{ "add_nectar": { "x": .., "y": .. } }`.
+    AddNectar { x: f64, y: f64 },
 }
 
 /// Handles for talking to a running simulation task.
@@ -51,7 +75,8 @@ pub struct SimHandle {
 ///
 /// The simulation starts in the running state.
 pub fn spawn() -> SimHandle {
-    let mut engine = Engine::seeded();
+    // Seed from entropy so each server launch grows a different colony.
+    let mut engine = Engine::from_seed(entropy_seed());
     let (snap_tx, snap_rx) = watch::channel(engine.snapshot());
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
 
@@ -71,7 +96,9 @@ pub fn spawn() -> SimHandle {
                     Command::Start => running = true,
                     Command::Pause => running = false,
                     Command::Reset => {
-                        engine.reset();
+                        // "Reshuffle": a fresh entropy seed, not a replay of the
+                        // previous colony — determinism is no longer the goal.
+                        engine.reset_with_seed(entropy_seed());
                         // Publish immediately so clients see the reset even
                         // while paused.
                         let _ = snap_tx.send(engine.snapshot());
@@ -84,6 +111,15 @@ pub fn spawn() -> SimHandle {
                             interval =
                                 tokio::time::interval(Duration::from_secs_f64(dt / speed));
                         }
+                    }
+                    Command::SpawnBee { x, y } => {
+                        engine.spawn_worker_at(x, y);
+                        // Publish so the added bee shows up at once, even paused.
+                        let _ = snap_tx.send(engine.snapshot());
+                    }
+                    Command::AddNectar { x, y } => {
+                        engine.add_nectar_at(x, y);
+                        let _ = snap_tx.send(engine.snapshot());
                     }
                 }
             }

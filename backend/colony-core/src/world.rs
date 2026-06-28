@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::bee::{Bee, BeeClass, BeeState};
 use crate::entity::{EntityId, IdAllocator};
 use crate::math::Vec3;
+use crate::rng::Rng;
+
+/// Seed used by [`World::seeded`] / [`World::empty`] and anything else that
+/// wants a fixed, reproducible colony — chiefly the test suite and the
+/// benchmarks. Production hosts (server, wasm) seed from entropy instead so
+/// every run differs; this constant is the "pin a known run" escape hatch.
+pub const DEFAULT_SEED: u64 = 0x5EED_B17E_C010_u64;
 
 /// Effective body radius of a bee, in world units. Bees are treated as spheres
 /// of this radius for collision avoidance.
@@ -25,6 +32,14 @@ const SEPARATION_STRENGTH: f64 = 400.0;
 /// Ceiling on a bee's speed (world units / s) after steering, so accumulated
 /// separation pushes can't fling a bee arbitrarily fast.
 const MAX_SPEED: f64 = 120.0;
+
+/// Strength (world units / s²) of the random "wander" nudge applied each tick to
+/// a bee that is in flight. This is the engine's one source of run-to-run
+/// variety: a small acceleration in a random direction, drawn from the world's
+/// seeded [`Rng`] in bee-index order so it stays reproducible given a seed. Kept
+/// well below the separation and foraging-seek strengths so it organically
+/// scatters flight paths without overpowering avoidance or a committed forage.
+const WANDER_JITTER_STRENGTH: f64 = 25.0;
 
 /// Energy at or below which a wandering bee peels off to forage, provided there
 /// is nectar to seek. Deliberately above the rest threshold in `bee.rs`: with
@@ -140,6 +155,12 @@ pub struct World {
     /// Monotonic — wax is built, never spent here. Surfaced as `waxGrams`.
     pub wax_grams: f64,
     ids: IdAllocator,
+    /// The world's single source of randomness, seeded explicitly so a given
+    /// seed always replays the same colony (see [`crate::rng`]). Drives the
+    /// seeded starting layout and the per-tick wander jitter. Everything else in
+    /// the engine stays a pure function of state — this is the *only* place
+    /// non-determinism is allowed to enter.
+    rng: Rng,
     /// Reusable scratch for the per-tick separation broad phase. Holds no
     /// simulation state — it is cleared and rebuilt every [`World::step`] — so
     /// it never participates in equality or determinism, only in keeping the
@@ -148,8 +169,16 @@ pub struct World {
 }
 
 impl World {
-    /// Create an empty world with the given bounds.
+    /// Create an empty world with the given bounds, using the fixed
+    /// [`DEFAULT_SEED`]. For a world whose randomness varies run to run, build it
+    /// with [`World::empty_with_seed`] (or one of the `*_seed` seeded builders)
+    /// and hand it an entropy-derived seed.
     pub fn empty(bounds: Bounds) -> Self {
+        Self::empty_with_seed(bounds, DEFAULT_SEED)
+    }
+
+    /// Create an empty world with the given bounds and an explicit RNG seed.
+    pub fn empty_with_seed(bounds: Bounds, seed: u64) -> Self {
         Self {
             bounds,
             bees: Vec::new(),
@@ -157,6 +186,7 @@ impl World {
             honey_stored: 0.0,
             wax_grams: 0.0,
             ids: IdAllocator::new(),
+            rng: Rng::from_seed(seed),
             grid: SpatialGrid::default(),
         }
     }
@@ -180,51 +210,67 @@ impl World {
         id
     }
 
-    /// Build the default seeded starting world: 500 bees with deterministic,
-    /// varied velocities plus a few nectar sources. Deterministic so the
-    /// initial state is reproducible without pulling in an RNG dependency. The
-    /// colony is cast as exactly one queen, a few drones, and workers for the
-    /// rest (see [`class_for`]) — at 500 that is 1 queen, 83 drones, 416 workers.
+    /// Build the default seeded starting world: 500 bees scattered with random
+    /// positions, headings, and energy, plus a few nectar sources. Uses the
+    /// fixed [`DEFAULT_SEED`], so this exact colony is reproducible — production
+    /// hosts call [`World::seeded_with_seed`] with an entropy seed instead, so
+    /// each run differs. The colony is cast as exactly one queen, a few drones,
+    /// and workers for the rest (see [`class_for`]) — at 500 that is 1 queen, 83
+    /// drones, 416 workers, regardless of seed (caste is index-based, not random).
     pub fn seeded() -> Self {
-        Self::seeded_with_count(500)
+        Self::seeded_with_seed(DEFAULT_SEED)
     }
 
-    /// Build a seeded world with `bee_count` bees. The placement and velocity
-    /// math is parameterized on `t = i / bee_count`, so the layout shape is
-    /// the same at any population — at `bee_count == 500` it is byte-identical
-    /// to [`World::seeded`]. Exists so benchmarks and scale tests can stress
-    /// arbitrary populations without an RNG; production still uses `seeded()`.
+    /// Build the default 500-bee colony from an explicit seed. Same seed → same
+    /// colony; the host passes an entropy-derived seed so the live simulation
+    /// varies run to run.
+    pub fn seeded_with_seed(seed: u64) -> Self {
+        Self::seeded_with_count_seed(500, seed)
+    }
+
+    /// Build a seeded world with `bee_count` bees, using [`DEFAULT_SEED`]. The
+    /// reproducible builder the benchmarks and scale tests use to stress
+    /// arbitrary populations.
     pub fn seeded_with_count(bee_count: usize) -> Self {
+        Self::seeded_with_count_seed(bee_count, DEFAULT_SEED)
+    }
+
+    /// Build a seeded world with `bee_count` bees from an explicit seed. The
+    /// colony's whole starting layout — positions, headings, speeds, and the
+    /// staggered energy reserves — is drawn from the seeded [`Rng`], so the same
+    /// seed reproduces it exactly while different seeds give genuinely different
+    /// colonies. Caste assignment stays index-based (see [`class_for`]), so the
+    /// queen/drone/worker breakdown is identical at every seed.
+    pub fn seeded_with_count_seed(bee_count: usize, seed: u64) -> Self {
         // A roomy box for a large colony: a 4000×4000 floor gives the swarm
         // space to spread without packing into a wall, and the depth is sized
         // for the eventual flight volume. Bees and resources are seeded flat at
         // z = 0 until flight behavior lands, so the third axis exists for real
         // in the geometry while visuals stay top-down for now.
         let bounds = Bounds::new(4000.0, 4000.0, 1000.0);
-        let mut world = World::empty(bounds);
+        let mut world = World::empty_with_seed(bounds, seed);
 
         for i in 0..bee_count {
-            let t = i as f64 / bee_count as f64;
-            // Spread starting positions across the interior, on the z = 0 plane.
+            // Scatter starting positions across the interior 60% of the floor,
+            // on the z = 0 plane, drawn from the seeded RNG.
             let position = Vec3::new(
-                bounds.width * (0.2 + 0.6 * fract(t * 7.0)),
-                bounds.height * (0.2 + 0.6 * fract(t * 3.0)),
+                world.rng.range(0.2 * bounds.width, 0.8 * bounds.width),
+                world.rng.range(0.2 * bounds.height, 0.8 * bounds.height),
                 0.0,
             );
-            // Varied directions at a steady speed, in the z = 0 plane for now.
-            let angle = t * std::f64::consts::TAU * 3.0;
-            let speed = 60.0 * fract(t + 0.5);
+            // A random heading at a random cruising speed, in the z = 0 plane.
+            let angle = world.rng.range(0.0, std::f64::consts::TAU);
+            let speed = world.rng.range(10.0, 60.0);
             let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
             world.spawn_bee(position, velocity, class_for(i));
 
             // Stagger starting energy across the colony. Identical full reserves
             // would drain in lockstep, so every bee would hit the rest threshold
             // on the same tick and the behavior breakdown would be all-or-nothing.
-            // Spreading the initial energy desynchronizes the rest/wake cycle so a
-            // live mix of wandering and resting bees is always on screen. Like the
-            // position and velocity above, it is parameterized on the bee index —
-            // deterministic, no RNG.
-            world.bees.last_mut().expect("just spawned a bee").energy = 0.5 + 0.5 * fract(t * 5.0);
+            // A random reserve in the upper half desynchronizes the rest/wake
+            // cycle so a live mix of wandering and resting bees is always on
+            // screen — drawn from the same seeded RNG as the layout above.
+            world.bees.last_mut().expect("just spawned a bee").energy = world.rng.range(0.5, 1.0);
         }
 
         for (fx, fy) in [(0.25, 0.3), (0.7, 0.25), (0.5, 0.75), (0.8, 0.7)] {
@@ -237,6 +283,34 @@ impl World {
         world
     }
 
+    /// Spawn a worker at an interactively-chosen point, giving it a random
+    /// heading and cruising speed from the world RNG so hand-placed bees fan out
+    /// naturally rather than all launching the same way. The point is clamped
+    /// into bounds. Drives the "add a bee" world-perturbation control.
+    pub fn spawn_worker_at(&mut self, x: f64, y: f64) -> EntityId {
+        let position = Vec3::new(
+            x.clamp(0.0, self.bounds.width),
+            y.clamp(0.0, self.bounds.height),
+            0.0,
+        );
+        let angle = self.rng.range(0.0, std::f64::consts::TAU);
+        let speed = self.rng.range(10.0, 60.0);
+        let velocity = Vec3::new(angle.cos() * speed, angle.sin() * speed, 0.0);
+        self.spawn_bee(position, velocity, BeeClass::Worker)
+    }
+
+    /// Add a nectar source at an interactively-chosen point, clamped into
+    /// bounds. Drives the "drop nectar" world-perturbation control; foraging
+    /// bees will steer to it like any other source.
+    pub fn add_nectar_at(&mut self, x: f64, y: f64) -> EntityId {
+        let position = Vec3::new(
+            x.clamp(0.0, self.bounds.width),
+            y.clamp(0.0, self.bounds.height),
+            0.0,
+        );
+        self.add_resource(position, ResourceKind::Nectar)
+    }
+
     /// Advance every bee by one fixed timestep of `dt` seconds.
     ///
     /// Runs in two strict passes so the result is independent of iteration
@@ -247,8 +321,13 @@ impl World {
     ///    each bee integrate and bounce off the walls as before.
     ///
     /// Steering only ever nudges velocity; [`Bee::step`] stays the sole
-    /// authority that confines a bee to the world, so neither avoidance nor the
-    /// foraging seek can eject one through a wall.
+    /// authority that confines a bee to the world, so neither avoidance, the
+    /// foraging seek, nor the random wander jitter can eject one through a wall.
+    ///
+    /// The wander jitter (see [`WANDER_JITTER_STRENGTH`]) is the engine's one
+    /// source of run-to-run variety. It is drawn from the world's seeded
+    /// [`Rng`] in bee-index order, so a given seed still replays exactly — the
+    /// engine is non-deterministic *across* seeds but reproducible *given* one.
     pub fn step(&mut self, dt: f64) {
         // Disjoint borrows: the grid fills its own buffer from `&self.bees`,
         // then the integration loop mutates `self.bees` while reading the
@@ -282,7 +361,25 @@ impl World {
             harvested += honey;
             wax_produced += scales;
 
-            let mut velocity = bee.velocity.add(separation.add(seek).scale(dt));
+            // A small random nudge for any bee in flight, so paths scatter and
+            // the colony never replays the same trajectory across seeds. Drawn
+            // here in bee-index order from the world RNG, so it stays
+            // reproducible for a fixed seed. Sedentary states (resting at the
+            // hive, building comb, laying eggs, loafing) get none — they aren't
+            // flying anywhere to wander.
+            let jitter = match bee.state {
+                BeeState::Wandering | BeeState::Foraging | BeeState::Flying => {
+                    let angle = self.rng.range(0.0, std::f64::consts::TAU);
+                    Vec3::new(
+                        angle.cos() * WANDER_JITTER_STRENGTH,
+                        angle.sin() * WANDER_JITTER_STRENGTH,
+                        0.0,
+                    )
+                }
+                _ => Vec3::ZERO,
+            };
+
+            let mut velocity = bee.velocity.add(separation.add(seek).add(jitter).scale(dt));
             let speed_squared = velocity.length_squared();
             if speed_squared > MAX_SPEED * MAX_SPEED {
                 velocity = velocity.normalized().scale(MAX_SPEED);
@@ -616,11 +713,6 @@ fn cell_of(position: Vec3) -> (i64, i64, i64) {
     )
 }
 
-/// Fractional part of `x`, in `[0, 1)`.
-fn fract(x: f64) -> f64 {
-    x - x.floor()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,6 +956,105 @@ mod tests {
 
         let total_scales: f64 = world.bees.iter().map(|b| b.wax_scales).sum();
         assert!((world.wax_grams - total_scales / SCALES_PER_GRAM).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spawn_worker_at_adds_an_in_bounds_worker() {
+        // The interactive "add a bee" perturbation: a worker appears at the
+        // clicked point (clamped into bounds) with a non-zero random heading.
+        let mut world = World::empty(Bounds::new(200.0, 200.0, 200.0));
+        let before = world.bees.len();
+        let id = world.spawn_worker_at(50.0, 75.0);
+        assert_eq!(world.bees.len(), before + 1);
+        let bee = world.bees.last().expect("just spawned");
+        assert_eq!(bee.id, id);
+        assert_eq!(bee.class, BeeClass::Worker);
+        assert_eq!(bee.position, Vec3::new(50.0, 75.0, 0.0));
+        assert_ne!(bee.velocity, Vec3::ZERO, "added bee should get a heading");
+
+        // Out-of-bounds clicks clamp onto the wall rather than spawning outside.
+        world.spawn_worker_at(-10.0, 10_000.0);
+        let clamped = world.bees.last().expect("just spawned");
+        assert_eq!(clamped.position, Vec3::new(0.0, 200.0, 0.0));
+    }
+
+    #[test]
+    fn add_nectar_at_adds_an_in_bounds_source() {
+        // The interactive "drop nectar" perturbation, clamped into bounds.
+        let mut world = World::empty(Bounds::new(200.0, 200.0, 200.0));
+        let id = world.add_nectar_at(500.0, 30.0);
+        let resource = world.resources.last().expect("just added");
+        assert_eq!(resource.id, id);
+        assert_eq!(resource.kind, ResourceKind::Nectar);
+        assert_eq!(resource.position, Vec3::new(200.0, 30.0, 0.0));
+    }
+
+    #[test]
+    fn invariants_hold_across_many_seeds() {
+        // With trajectories no longer bit-identical, regressions are caught by
+        // invariants that must hold *whatever* the seed: this samples a spread of
+        // seeds and asserts the colony never violates its physical/biological
+        // constraints over a run. This is the broad safety net that replaces the
+        // old single bit-exact determinism guard.
+        for seed in 0..24u64 {
+            let mut world = World::seeded_with_seed(seed);
+            for _ in 0..300 {
+                world.step(1.0 / 30.0);
+                assert!(
+                    (0.0..=1.0).contains(&world.honey_stored),
+                    "honey out of range at seed {seed}: {}",
+                    world.honey_stored
+                );
+                assert!(world.wax_grams >= 0.0, "wax went negative at seed {seed}");
+                for bee in &world.bees {
+                    assert!(
+                        bee.position.x >= 0.0
+                            && bee.position.x <= world.bounds.width
+                            && bee.position.y >= 0.0
+                            && bee.position.y <= world.bounds.height
+                            && bee.position.z >= 0.0
+                            && bee.position.z <= world.bounds.depth,
+                        "bee left bounds at seed {seed}: {:?}",
+                        bee.position
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&bee.energy),
+                        "energy out of range at seed {seed}: {}",
+                        bee.energy
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colony_spreads_across_states_on_most_seeds() {
+        // A statistical regression check: a healthy colony should fan out into a
+        // mix of behaviors rather than moving in lockstep. We don't demand it of
+        // every individual seed (rare layouts can be quiet), but across a sample
+        // the large majority must show at least two coexisting states at some
+        // point — if behavior collapses to one state everywhere, something broke.
+        let mut lively = 0;
+        for seed in 0..24u64 {
+            let mut world = World::seeded_with_seed(seed);
+            let mut saw_two = false;
+            for _ in 0..600 {
+                world.step(1.0 / 30.0);
+                // Two coexisting states this tick: some bee differs from the first.
+                let first = world.bees.first().map(|b| b.state);
+                if let Some(first) = first {
+                    if world.bees.iter().any(|b| b.state != first) {
+                        saw_two = true;
+                        break;
+                    }
+                }
+            }
+            lively += saw_two as u32;
+        }
+        assert!(
+            lively >= 22,
+            "expected most seeds to show a mix of states, only {lively}/24 did"
+        );
     }
 
     #[test]

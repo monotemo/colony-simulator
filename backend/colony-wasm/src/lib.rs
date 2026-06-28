@@ -21,11 +21,14 @@ pub struct WasmEngine {
 
 #[wasm_bindgen]
 impl WasmEngine {
-    /// Create an engine with the default seeded world.
+    /// Create an engine seeded from `seed`. The browser passes an entropy value
+    /// (e.g. `Math.random() * 2**32`), so each page load grows a different
+    /// colony; the engine stays reproducible for any fixed seed. A 32-bit seed
+    /// is plenty of variety here and avoids the `u64`/BigInt boundary in JS.
     #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmEngine {
+    pub fn new(seed: u32) -> WasmEngine {
         WasmEngine {
-            engine: Engine::seeded(),
+            engine: Engine::from_seed(seed as u64),
         }
     }
 
@@ -34,9 +37,20 @@ impl WasmEngine {
         self.engine.step(dt);
     }
 
-    /// Reset to a fresh seeded world at tick 0.
-    pub fn reset(&mut self) {
-        self.engine.reset();
+    /// Reshuffle into a fresh colony at tick 0 using `seed` (the browser passes a
+    /// new entropy value), so reset is a new colony rather than a replay.
+    pub fn reset(&mut self, seed: u32) {
+        self.engine.reset_with_seed(seed as u64);
+    }
+
+    /// Spawn a worker at a world-space point — the interactive "add a bee".
+    pub fn spawn_bee(&mut self, x: f64, y: f64) {
+        self.engine.spawn_worker_at(x, y);
+    }
+
+    /// Drop a nectar source at a world-space point — interactive "add nectar".
+    pub fn add_nectar(&mut self, x: f64, y: f64) {
+        self.engine.add_nectar_at(x, y);
     }
 
     /// Serialize the current world state as a `WorldSnapshot` JSON string.
@@ -47,6 +61,8 @@ impl WasmEngine {
 
 impl Default for WasmEngine {
     fn default() -> Self {
-        Self::new()
+        // A fixed-seed colony for the trait's no-argument constructor; live
+        // callers always pass an entropy seed via `new`.
+        Self::new(0)
     }
 }

@@ -20,15 +20,42 @@ impl Engine {
         Self { world, tick: 0 }
     }
 
-    /// Create an engine with the default seeded world.
+    /// Create an engine with the default (fixed-seed) seeded world. Reproducible
+    /// — used by tests and benchmarks. Live hosts use [`Engine::from_seed`] with
+    /// an entropy seed so each run differs.
     pub fn seeded() -> Self {
         Self::new(World::seeded())
     }
 
-    /// Reset the engine back to a fresh seeded world at tick 0.
+    /// Create an engine seeded explicitly. Same seed → same colony and same
+    /// trajectory; the server and wasm wrappers pass an entropy-derived seed.
+    pub fn from_seed(seed: u64) -> Self {
+        Self::new(World::seeded_with_seed(seed))
+    }
+
+    /// Reset the engine back to a fresh default (fixed-seed) world at tick 0.
     pub fn reset(&mut self) {
-        self.world = World::seeded();
+        self.reset_with_seed(crate::world::DEFAULT_SEED);
+    }
+
+    /// Reset to a fresh seeded world at tick 0 using an explicit seed. Hosts pass
+    /// a new entropy seed here so "reshuffle" yields a genuinely different colony
+    /// rather than replaying the previous one.
+    pub fn reset_with_seed(&mut self, seed: u64) {
+        self.world = World::seeded_with_seed(seed);
         self.tick = 0;
+    }
+
+    /// Spawn a worker at a world-space point (an interactive perturbation). The
+    /// bee gets a random heading from the world RNG (see
+    /// [`World::spawn_worker_at`]).
+    pub fn spawn_worker_at(&mut self, x: f64, y: f64) {
+        self.world.spawn_worker_at(x, y);
+    }
+
+    /// Add a nectar source at a world-space point (an interactive perturbation).
+    pub fn add_nectar_at(&mut self, x: f64, y: f64) {
+        self.world.add_nectar_at(x, y);
     }
 
     /// Advance the simulation by one fixed timestep of `dt` seconds.
@@ -80,21 +107,33 @@ mod tests {
         assert_eq!(engine.tick(), 0);
     }
 
-    #[test]
-    fn stepping_from_the_seed_is_deterministic() {
-        // The engine has no RNG, so two runs from the same seed must produce
-        // bit-identical trajectories. This is the contract that collision
-        // avoidance (which reads neighbours and sums forces) must not break —
-        // re-run it after any change to `World::step`.
-        fn run(steps: u64) -> WorldSnapshot {
-            let mut engine = Engine::seeded();
-            for _ in 0..steps {
-                engine.step(1.0 / 30.0);
-            }
-            engine.snapshot()
+    fn run_from_seed(seed: u64, steps: u64) -> WorldSnapshot {
+        let mut engine = Engine::from_seed(seed);
+        for _ in 0..steps {
+            engine.step(1.0 / 30.0);
         }
+        engine.snapshot()
+    }
 
-        assert_eq!(run(600), run(600));
+    #[test]
+    fn same_seed_replays_bit_identically() {
+        // The engine is no longer deterministic across runs — but it must stay
+        // reproducible *given a seed*: that is the contract debugging and the
+        // test suite lean on now that bit-exact run comparison is gone. Two runs
+        // from the same seed must still produce bit-identical trajectories, which
+        // is also what guards that collision avoidance and wander jitter consume
+        // the RNG in a fixed order. Re-run this after any change to `World::step`.
+        assert_eq!(run_from_seed(7, 600), run_from_seed(7, 600));
+    }
+
+    #[test]
+    fn different_seeds_produce_different_colonies() {
+        // The flip side of the seeded guard: dropping determinism means distinct
+        // seeds must actually diverge, both in the starting layout and after a
+        // run. If this ever passes by accident (e.g. the seed is ignored), the
+        // simulation has silently gone back to replaying one fixed script.
+        assert_ne!(run_from_seed(1, 0).bees, run_from_seed(2, 0).bees);
+        assert_ne!(run_from_seed(1, 600).bees, run_from_seed(2, 600).bees);
     }
 
     #[test]

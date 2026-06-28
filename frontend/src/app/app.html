@@ -76,7 +76,36 @@
               <path d="M12 7a5 5 0 1 1-1.4-3.5" />
               <path d="M12.2 1.6 12.2 4.2 9.6 4.2" />
             </svg>
-            Reset
+            Reshuffle
+          </button>
+
+          <span class="dock-divider"></span>
+
+          <!-- World-perturbation tools: click the world to drop a bee or nectar. -->
+          <button
+            type="button"
+            class="btn btn--ghost"
+            [class.active]="tool() === 'spawnBee'"
+            [attr.aria-pressed]="tool() === 'spawnBee'"
+            (click)="toggleTool('spawnBee')"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <ellipse cx="7" cy="7" rx="3" ry="4.4" fill="currentColor" />
+              <path d="M7 1.4v2M2.2 4.6l2 1M11.8 4.6l-2 1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            </svg>
+            Add bee
+          </button>
+          <button
+            type="button"
+            class="btn btn--ghost"
+            [class.active]="tool() === 'addNectar'"
+            [attr.aria-pressed]="tool() === 'addNectar'"
+            (click)="toggleTool('addNectar')"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.2" fill="currentColor" />
+            </svg>
+            Nectar
           </button>
 
           <span class="dock-divider"></span>

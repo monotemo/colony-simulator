@@ -5,10 +5,24 @@ import { WorldSnapshot } from './models';
 /** Tick rate of the in-browser engine, matching the server's 30 Hz. */
 const TICK_HZ = 30;
 
+/**
+ * A fresh 32-bit entropy seed for the engine. The wasm `WasmEngine` takes a
+ * `u32`, so each page load and each reshuffle seeds a different colony while the
+ * engine stays reproducible for any fixed seed (see `colony_wasm`).
+ */
+function randomSeed(): number {
+  return Math.floor(Math.random() * 0x1_0000_0000) >>> 0;
+}
+
 /** Minimal shape of the wasm-pack engine class (see `colony_wasm.d.ts`). */
 interface WasmEngine {
   step(dt: number): void;
-  reset(): void;
+  /** Reshuffle into a fresh colony seeded from `seed` (entropy from JS). */
+  reset(seed: number): void;
+  /** Spawn a worker at a world-space point (interactive "add a bee"). */
+  spawn_bee(x: number, y: number): void;
+  /** Drop a nectar source at a world-space point (interactive "add nectar"). */
+  add_nectar(x: number, y: number): void;
   snapshot_json(): string;
   free(): void;
 }
@@ -16,7 +30,7 @@ interface WasmEngine {
 /** Minimal shape of the wasm-pack ES module (`--target web`). */
 interface WasmModule {
   default: (input?: unknown) => Promise<unknown>;
-  WasmEngine: new () => WasmEngine;
+  WasmEngine: new (seed: number) => WasmEngine;
 }
 
 /**
@@ -58,7 +72,20 @@ export class WasmSimulationService extends SimulationService {
   }
 
   reset(): void {
-    this.engine?.reset();
+    // Reshuffle: a fresh entropy seed, so reset grows a new colony rather than
+    // replaying the previous one (the engine is no longer deterministic).
+    this.engine?.reset(randomSeed());
+    this.publish();
+  }
+
+  spawnBee(x: number, y: number): void {
+    this.engine?.spawn_bee(x, y);
+    // Publish at once so a click lands a visible bee even while paused.
+    this.publish();
+  }
+
+  addNectar(x: number, y: number): void {
+    this.engine?.add_nectar(x, y);
     this.publish();
   }
 
@@ -86,7 +113,7 @@ export class WasmSimulationService extends SimulationService {
       return;
     }
 
-    this.engine = new mod.WasmEngine();
+    this.engine = new mod.WasmEngine(randomSeed());
     this.zone.run(() => this.connected.set(true));
     this.publish();
 
