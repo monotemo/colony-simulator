@@ -1,14 +1,26 @@
 import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
 import { SimulationService } from './simulation.service';
 import { ControlCommand, WorldSnapshot } from './models';
+import { environment } from '../environments/environment';
+
+/** First reconnect delay; doubles per failed attempt up to the cap below. */
+const INITIAL_RECONNECT_DELAY_MS = 1000;
+/**
+ * Ceiling on the reconnect backoff. Long enough not to hammer a downed backend,
+ * short enough that recovery (including a Fly scale-to-zero cold start) is
+ * picked up promptly once the server is back.
+ */
+const MAX_RECONNECT_DELAY_MS = 15000;
 
 /**
  * Streams the latest {@link WorldSnapshot} from the Rust server over a
  * WebSocket and sends control commands over REST.
  *
- * URLs are derived from the page origin, so the same build works both behind
- * the Angular dev-server proxy and when served as static files by the Rust
- * server. Used for local development against `colony-server`.
+ * URLs come from `environment.backendUrl`: when empty (dev) they resolve to the
+ * page origin, so the same build works behind the Angular dev-server proxy and
+ * when served as static files by the Rust server; when set (production on
+ * GitHub Pages) they point at the colony-server deployed on Fly.io, which the
+ * server allows via its permissive CORS layer.
  */
 @Injectable({ providedIn: 'root' })
 export class WebSocketSimulationService extends SimulationService {
@@ -20,8 +32,17 @@ export class WebSocketSimulationService extends SimulationService {
   // optimistically since snapshots don't carry a running flag.
   readonly running = signal(true);
 
+  /**
+   * `environment.backendUrl` with any trailing slash trimmed, so path
+   * concatenation can't produce `//ws` / `//api/control` (which some servers
+   * reject). Empty in dev, meaning same-origin URLs.
+   */
+  private readonly backend = environment.backendUrl.replace(/\/+$/, '');
+
   private socket?: WebSocket;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /** Current reconnect backoff; reset on a successful open. */
+  private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
   private closed = false;
 
   constructor() {
@@ -60,21 +81,50 @@ export class WebSocketSimulationService extends SimulationService {
     void this.control({ add_nectar: { x, y } });
   }
 
+  /**
+   * The `/ws` endpoint URL. Derived from `environment.backendUrl` when set
+   * (swapping the http(s) scheme for ws(s)), otherwise from the page origin so
+   * dev keeps working through the proxy.
+   */
+  private socketUrl(): string {
+    if (this.backend) {
+      return `${this.backend.replace(/^http/, 'ws')}/ws`;
+    }
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.host}/ws`;
+  }
+
   private async control(command: ControlCommand): Promise<void> {
-    await fetch('/api/control', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ command }),
-    });
+    // Fire-and-forget from the caller's view, but don't swallow failures
+    // silently: a rejected command or an unreachable backend is logged so it's
+    // diagnosable rather than vanishing.
+    try {
+      const response = await fetch(`${this.backend}/api/control`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+      if (!response.ok) {
+        console.warn(
+          `control command rejected (${response.status} ${response.statusText})`,
+          command,
+        );
+      }
+    } catch (error) {
+      console.warn('control command failed to reach the backend', command, error);
+    }
   }
 
   private connect(): void {
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${window.location.host}/ws`;
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(this.socketUrl());
     this.socket = socket;
 
-    socket.onopen = () => this.zone.run(() => this.connected.set(true));
+    socket.onopen = () =>
+      this.zone.run(() => {
+        this.connected.set(true);
+        // Good connection — start the backoff over for the next drop.
+        this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+      });
 
     socket.onmessage = (event) => {
       let parsed: WorldSnapshot;
@@ -100,10 +150,14 @@ export class WebSocketSimulationService extends SimulationService {
     if (this.closed || this.reconnectTimer) {
       return;
     }
+    const delay = this.reconnectDelay;
+    // Capped exponential backoff so a sustained outage isn't hammered, while a
+    // brief drop (or a cold-starting backend) still reconnects quickly.
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.connect();
-    }, 1000);
+    }, delay);
   }
 
   private disconnect(): void {
