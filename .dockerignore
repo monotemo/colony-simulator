@@ -1,10 +1,12 @@
-# Only the Rust backend is built into the image — keep the build context small
-# and free of artifacts that would bust the layer cache on the remote builder.
+# Keep the build context small and free of artifacts that would bust the layer
+# cache on the remote builder. The image builds both the Rust backend and the
+# Angular frontend, so frontend sources stay in — only their build artifacts and
+# installed dependencies are excluded (the image reinstalls/rebuilds them).
 .git
 .github
 .claude
-frontend
 **/node_modules
 **/target
-dist
+**/dist
+frontend/public/wasm
 *.md

@@ -3,7 +3,8 @@
 A live, interactive bee-colony simulation: an engine written in **Rust**,
 rendered by an **Angular + three.js** frontend. The same engine runs two ways —
 streamed from a server over WebSocket (local dev) or compiled to WebAssembly and
-run in-browser (static GitHub Pages build).
+run in-browser (the deployed Fly.io build, where `colony-server` serves the
+static bundle and the engine runs in the browser).
 
 The engine is **seeded, not deterministic across runs.** It once replayed one
 fixed script bit-for-bit; that constraint was a scaffold for early profiling and
@@ -114,7 +115,7 @@ npm install
 npm start                        # ng serve on http://localhost:4200
 npm run build                    # production (wasm) build → dist/colony-simulator/browser
 npm test                         # Karma + Jasmine unit tests
-npm run build:pages              # wasm-pack + ng build for GitHub Pages
+npm run build:static             # wasm-pack + ng build (the bundle the Fly server serves)
 ```
 
 ## Conventions

@@ -1,13 +1,15 @@
-name: Deploy backend to Fly
+name: Deploy to Fly
 
-# Deploy the colony-server (Axum) backend to Fly.io. Runs on pushes to main that
-# touch the backend or its deploy config, and can always be triggered by hand.
+# Deploy the full colony-simulator (Axum backend + the Angular frontend it
+# serves) to Fly.io. Runs on pushes to main that touch the backend, the
+# frontend, or the deploy config, and can always be triggered by hand.
 # Requires a FLY_API_TOKEN repository secret (a Fly deploy token).
 on:
   push:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'frontend/**'
       - 'Dockerfile'
       - 'fly.toml'
       - '.dockerignore'
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   deploy:
-    name: Deploy colony-server
+    name: Deploy colony-simulator
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

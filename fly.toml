@@ -1,8 +1,10 @@
-# Fly.io config for the colony-server backend (API + WebSocket).
+# Fly.io config for the full colony-simulator: the colony-server backend
+# (API + WebSocket) *and* the Angular frontend it serves as static files.
 #
 # The app name is global and must match the app created on Fly
-# (`fly apps create colony-simulator-api`). The frontend is hosted on GitHub
-# Pages, so this deploys the Rust server alone.
+# (`fly apps create colony-simulator-api`). The Dockerfile builds the Angular
+# bundle into the image and sets COLONY_STATIC_DIR, so the server serves the
+# frontend at the origin root alongside /ws + /api — one app, one origin.
 
 app = "colony-simulator-api"
 primary_region = "iad"
@@ -14,8 +16,9 @@ primary_region = "iad"
   # The server binds 0.0.0.0:8080 (see colony-server/src/main.rs).
   internal_port = 8080
   force_https = true
-  # Scale to zero when idle to keep a demo backend cheap; a live WebSocket
-  # connection counts as traffic, so an active client keeps the machine up.
+  # Scale to zero when idle to keep the demo cheap. The frontend runs in-browser
+  # (wasm), so a visit is a burst of static-file requests rather than a held
+  # WebSocket — the machine cold-starts to serve the bundle, then stops again.
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
