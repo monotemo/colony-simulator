@@ -21,8 +21,10 @@ RUN rustup target add wasm32-unknown-unknown \
 WORKDIR /app
 # The whole Cargo workspace lives under backend/. Copy it in, build the server
 # in release mode, then build the wasm engine into a standalone package dir.
+# --manifest-path points cargo at the workspace root (backend/Cargo.toml); the
+# build target lands at /app/backend/target.
 COPY backend/ ./backend/
-RUN cargo build --release -p colony-server
+RUN cargo build --release --manifest-path backend/Cargo.toml -p colony-server
 RUN wasm-pack build backend/colony-wasm --target web --release --out-dir /wasm-pkg
 
 # ---- node stage: Angular production build ------------------------------------
