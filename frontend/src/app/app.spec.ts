@@ -2,7 +2,7 @@ import { WritableSignal, signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { App } from './app';
 import { SimulationService } from './simulation.service';
-import { BeeClass, BeeSnapshot, BeeState, WorldSnapshot } from './models';
+import { BeeClass, BeeSnapshot, BeeState, ColonyStats, WorldSnapshot } from './models';
 
 /** Minimal stand-in so components that inject the service can be created. */
 class StubSimulationService implements Partial<SimulationService> {
@@ -27,12 +27,42 @@ function bee(over: Partial<BeeSnapshot> & { beeClass: BeeClass; state: BeeState 
   };
 }
 
+/**
+ * Aggregate stats from a bee list the way the engine does (`ColonyStats::tally`
+ * in `snapshot.rs`), so the rail — which reads only `stats` — sees numbers
+ * consistent with the bees a test hands in.
+ */
+function statsOf(bees: BeeSnapshot[]): ColonyStats {
+  const stateCounts = {
+    wandering: 0,
+    foraging: 0,
+    resting: 0,
+    building_comb: 0,
+    laying_eggs: 0,
+    loafing: 0,
+    flying: 0,
+  };
+  const casteCounts = { queen: 0, worker: 0, drone: 0 };
+  for (const bee of bees) {
+    stateCounts[bee.state]++;
+    casteCounts[bee.beeClass]++;
+  }
+  return {
+    population: bees.length,
+    casteCounts,
+    stateCounts,
+    avgEnergy: bees.length === 0 ? 0 : bees.reduce((sum, bee) => sum + bee.energy, 0) / bees.length,
+    waxScalesTotal: bees.reduce((sum, bee) => sum + bee.waxScales, 0),
+  };
+}
+
 function world(bees: BeeSnapshot[], waxGrams = 0): WorldSnapshot {
   return {
     tick: 1,
     bounds: { width: 100, height: 100, depth: 100 },
     bees,
     resources: [],
+    stats: statsOf(bees),
     honeyStored: 0,
     waxGrams,
   };
@@ -42,9 +72,7 @@ describe('App', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [App],
-      providers: [
-        { provide: SimulationService, useClass: StubSimulationService },
-      ],
+      providers: [{ provide: SimulationService, useClass: StubSimulationService }],
     }).compileComponents();
   });
 

@@ -1,6 +1,6 @@
 import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
 import { SimulationService } from './simulation.service';
-import { ControlCommand, WorldSnapshot } from './models';
+import { ControlCommand, ViewportRect, WorldSnapshot } from './models';
 import { SnapshotDecoder } from './snapshot-codec';
 import { environment } from '../environments/environment';
 
@@ -49,6 +49,11 @@ export class WebSocketSimulationService extends SimulationService {
   /** Current reconnect backoff; reset on a successful open. */
   private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
   private closed = false;
+  /**
+   * The last viewport the canvas reported, so it can be replayed to the server
+   * whenever a (re)connection opens — culling state is per-connection there.
+   */
+  private viewport?: ViewportRect;
 
   constructor() {
     super();
@@ -84,6 +89,28 @@ export class WebSocketSimulationService extends SimulationService {
 
   addNectar(x: number, y: number): void {
     void this.control({ add_nectar: { x, y } });
+  }
+
+  override setViewport(rect: ViewportRect): void {
+    this.viewport = rect;
+    this.sendViewport();
+  }
+
+  /**
+   * Tell the server what this client can see, as the `{"viewport": ...}` text
+   * message `colony_server`'s socket handler expects (snake_case keys, matching
+   * its serde shape). The server then culls per-tick motion to this rect.
+   */
+  private sendViewport(): void {
+    const rect = this.viewport;
+    if (!rect || this.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.socket.send(
+      JSON.stringify({
+        viewport: { min_x: rect.minX, min_y: rect.minY, max_x: rect.maxX, max_y: rect.maxY },
+      }),
+    );
   }
 
   /**
@@ -133,6 +160,9 @@ export class WebSocketSimulationService extends SimulationService {
         this.connected.set(true);
         // Good connection — start the backoff over for the next drop.
         this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+        // Culling state is per-connection on the server, so replay the canvas's
+        // viewport (if it reported one) to the fresh socket.
+        this.sendViewport();
       });
 
     socket.onmessage = (event) => {

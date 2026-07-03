@@ -1,5 +1,5 @@
 import { Signal } from '@angular/core';
-import { WorldSnapshot } from './models';
+import { ViewportRect, WorldSnapshot } from './models';
 
 /**
  * Abstract contract for a simulation source. Components depend on this; the
@@ -50,4 +50,15 @@ export abstract class SimulationService {
    * Defaults to a no-op so a source can still opt out.
    */
   setSpeed(_multiplier: number): void {}
+
+  /**
+   * Report the world-space rect this client's camera can see (the canvas calls
+   * this on zoom/resize/follow, already padded with a margin). A source may use
+   * it for interest management: the WebSocket transport forwards it so the
+   * server culls per-tick motion to the visible bees, making bandwidth scale
+   * with the screen rather than the colony. Defaults to a no-op — the wasm
+   * engine runs locally, so there is no wire to save and the full colony is
+   * always at hand.
+   */
+  setViewport(_rect: ViewportRect): void {}
 }

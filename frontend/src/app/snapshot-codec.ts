@@ -9,10 +9,14 @@
  * - **Roster** (rare): the world's membership — bounds, each bee's id and
  *   caste, the resource nodes. Sent when a client connects and whenever
  *   membership changes (spawn, added nectar, reset), stamped with a version.
- * - **Motion** (every tick): positions, velocities, energy, wax and behavior
- *   state as `f32` arrays keyed by index into the roster, plus the tick and
- *   colony totals. Carries the roster version it was built against, so a
- *   motion frame can never be applied to the wrong membership.
+ * - **Motion** (every published tick): positions, velocities, energy, wax and
+ *   behavior state as `f32` arrays keyed by index into the roster, plus the
+ *   tick, colony totals, and the colony-wide aggregates the stats rail
+ *   consumes. Carries the roster version it was built against, so a motion
+ *   frame can never be applied to the wrong membership. Two shapes: **dense**
+ *   (type 2, every bee in roster order) and **sparse** (type 3, only the bees
+ *   inside the viewport this client reported, prefixed with their roster
+ *   indices). Sparse aggregates still describe the whole colony.
  *
  * A packet handed to {@link SnapshotDecoder.decode} may hold one message (the
  * WebSocket transport sends roster and motion as separate frames) or several
@@ -29,6 +33,8 @@ import {
   BeeSnapshot,
   BeeState,
   Bounds,
+  CasteCounts,
+  ColonyStats,
   ResourceKind,
   ResourceSnapshot,
   Sex,
@@ -37,13 +43,17 @@ import {
 
 /** First byte of a roster message (`wire.rs` `ROSTER_MESSAGE`). */
 const ROSTER_MESSAGE = 1;
-/** First byte of a motion message (`wire.rs` `MOTION_MESSAGE`). */
+/** First byte of a dense motion message (`wire.rs` `MOTION_MESSAGE`). */
 const MOTION_MESSAGE = 2;
+/** First byte of a sparse motion message (`wire.rs` `SPARSE_MOTION_MESSAGE`). */
+const SPARSE_MOTION_MESSAGE = 3;
 
-/** Fixed bytes of a motion message before the per-bee arrays begin. */
-const MOTION_HEADER_LEN = 28;
+/** Fixed bytes of a motion message before the index/array blocks begin. */
+const MOTION_HEADER_LEN = 64;
 /** Per-bee bytes in a motion message (position + velocity + energy + wax + state). */
 const MOTION_BYTES_PER_BEE = 33;
+/** Per-bee bytes in a sparse motion message (a u32 roster index on top). */
+const SPARSE_BYTES_PER_BEE = MOTION_BYTES_PER_BEE + 4;
 
 /** Wire byte → caste, in the exact order of `wire.rs` `class_byte`. */
 const BEE_CLASSES: readonly BeeClass[] = ['queen', 'worker', 'drone'];
@@ -78,6 +88,8 @@ interface Roster {
   bounds: Bounds;
   bees: readonly { id: number; beeClass: BeeClass; sex: Sex }[];
   resources: readonly ResourceSnapshot[];
+  /** Caste tallies, derived once at parse — the roster always lists the whole colony. */
+  casteCounts: CasteCounts;
 }
 
 /**
@@ -108,8 +120,8 @@ export class SnapshotDecoder {
       const type = view.getUint8(offset);
       if (type === ROSTER_MESSAGE) {
         offset = this.readRoster(view, offset);
-      } else if (type === MOTION_MESSAGE) {
-        const motion = this.readMotion(view, offset);
+      } else if (type === MOTION_MESSAGE || type === SPARSE_MOTION_MESSAGE) {
+        const motion = this.readMotion(view, offset, type === SPARSE_MOTION_MESSAGE);
         offset = motion.next;
         snapshot = motion.snapshot ?? snapshot;
       } else {
@@ -135,10 +147,12 @@ export class SnapshotDecoder {
     let at = offset + 25;
 
     const bees = new Array<Roster['bees'][number]>(beeCount);
+    const casteCounts: CasteCounts = { queen: 0, worker: 0, drone: 0 };
     for (let i = 0; i < beeCount; i++) {
       const id = view.getUint32(at, true);
       const beeClass = BEE_CLASSES[view.getUint8(at + 4)];
       bees[i] = { id, beeClass, sex: SEX_OF[beeClass] };
+      casteCounts[beeClass]++;
       at += 5;
     }
 
@@ -156,28 +170,42 @@ export class SnapshotDecoder {
       at += 17;
     }
 
-    this.roster = { version, bounds, bees, resources };
+    this.roster = { version, bounds, bees, resources, casteCounts };
     return at;
   }
 
   /**
-   * Parse a motion message at `offset` and join it with the current roster.
-   * Always computes `next` (the message length depends only on the bee count),
-   * so decoding continues even when the snapshot itself is unusable.
+   * Parse a motion message (dense or sparse) at `offset` and join it with the
+   * current roster. Always computes `next` (the message length depends only on
+   * the bee count and shape), so decoding continues even when the snapshot
+   * itself is unusable.
    */
   private readMotion(
     view: DataView,
     offset: number,
+    sparse: boolean,
   ): { snapshot: WorldSnapshot | null; next: number } {
     const version = view.getUint32(offset + 1, true);
     const tick = view.getFloat64(offset + 5, true);
     const honeyStored = view.getFloat32(offset + 13, true);
     const waxGrams = view.getFloat32(offset + 17, true);
-    const beeCount = view.getUint32(offset + 21, true);
-    const next = offset + MOTION_HEADER_LEN + beeCount * MOTION_BYTES_PER_BEE;
+    const avgEnergy = view.getFloat32(offset + 21, true);
+    const waxScalesTotal = view.getFloat32(offset + 25, true);
+    const stateCounts = {} as Record<BeeState, number>;
+    BEE_STATES.forEach((state, i) => {
+      stateCounts[state] = view.getUint32(offset + 29 + i * 4, true);
+    });
+    // Bees carried by *this message* — the whole colony for a dense frame,
+    // the visible subset for a sparse one.
+    const beeCount = view.getUint32(offset + 57, true);
+    const perBee = sparse ? SPARSE_BYTES_PER_BEE : MOTION_BYTES_PER_BEE;
+    const next = offset + MOTION_HEADER_LEN + beeCount * perBee;
 
     const roster = this.roster;
-    if (!roster || roster.version !== version || roster.bees.length !== beeCount) {
+    const countUsable = sparse
+      ? beeCount <= (roster?.bees.length ?? 0)
+      : beeCount === roster?.bees.length;
+    if (!roster || roster.version !== version || !countUsable) {
       console.warn(
         `motion frame for roster v${version} (${beeCount} bees) does not match ` +
           `held roster ${roster ? `v${roster.version} (${roster.bees.length} bees)` : '(none)'}; dropping`,
@@ -185,8 +213,15 @@ export class SnapshotDecoder {
       return { snapshot: null, next };
     }
 
+    // Sparse frames lead with the roster index of each carried bee; a dense
+    // frame's arrays are simply in roster order.
+    const indices = offset + MOTION_HEADER_LEN;
+    const rosterIndex = sparse
+      ? (i: number) => view.getUint32(indices + i * 4, true)
+      : (i: number) => i;
+
     // Struct-of-arrays: each block is contiguous, per-bee values by index.
-    const positions = offset + MOTION_HEADER_LEN;
+    const positions = indices + (sparse ? beeCount * 4 : 0);
     const velocities = positions + beeCount * 12;
     const energies = velocities + beeCount * 12;
     const waxScales = energies + beeCount * 4;
@@ -194,7 +229,7 @@ export class SnapshotDecoder {
 
     const bees = new Array<BeeSnapshot>(beeCount);
     for (let i = 0; i < beeCount; i++) {
-      const identity = roster.bees[i];
+      const identity = roster.bees[rosterIndex(i)];
       bees[i] = {
         id: identity.id,
         beeClass: identity.beeClass,
@@ -215,12 +250,23 @@ export class SnapshotDecoder {
       };
     }
 
+    const stats: ColonyStats = {
+      // The roster always lists the whole colony, so population and caste
+      // tallies come from it; the per-tick aggregates ride the header.
+      population: roster.bees.length,
+      casteCounts: roster.casteCounts,
+      stateCounts,
+      avgEnergy,
+      waxScalesTotal,
+    };
+
     return {
       snapshot: {
         tick,
         bounds: roster.bounds,
         bees,
         resources: roster.resources.slice(),
+        stats,
         honeyStored,
         waxGrams,
       },

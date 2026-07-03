@@ -1,6 +1,7 @@
 import {
   Component,
   ElementRef,
+  NgZone,
   OnDestroy,
   afterNextRender,
   effect,
@@ -11,7 +12,7 @@ import {
 } from '@angular/core';
 import * as THREE from 'three';
 import { SimulationService } from './simulation.service';
-import { BeeClass, BeeSnapshot, BeeState, Vec3, WorldSnapshot } from './models';
+import { BeeClass, BeeSnapshot, BeeState, Vec3, ViewportRect, WorldSnapshot } from './models';
 
 /**
  * What a click on the world does: follow a bee (the default), or place a new
@@ -35,8 +36,16 @@ export type PointerTool = 'follow' | 'spawnBee' | 'addNectar';
  *
  * The canvas is transparent: the warm radial-gradient "stage" behind it (styled
  * in the dashboard SCSS) shows through as the colony floor, so there is no
- * opaque ground plane. The scene is redrawn whenever a new snapshot arrives
- * (~30 Hz), on zoom, and on resize — there is no continuous animation loop.
+ * opaque ground plane.
+ *
+ * Snapshots arrive at ~10 Hz (the transports publish every third engine tick),
+ * so the canvas *interpolates*: each new snapshot becomes the target and a
+ * requestAnimationFrame loop glides every bee from where the previous snapshot
+ * left it. The loop is bounded — it stops the moment it has caught up with the
+ * latest snapshot — so a paused or disconnected simulation costs no frames.
+ * Zoom and resize still redraw immediately. The canvas also reports the world
+ * rect the camera can see to the simulation source (see {@link reportViewport})
+ * so the server can cull off-screen bees from the stream.
  */
 @Component({
   selector: 'app-world-canvas',
@@ -61,8 +70,8 @@ export type PointerTool = 'follow' | 'spawnBee' | 'addNectar';
 })
 export class WorldCanvas implements OnDestroy {
   private readonly sim = inject(SimulationService);
-  private readonly canvas =
-    viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
+  private readonly zone = inject(NgZone);
+  private readonly canvas = viewChild.required<ElementRef<HTMLCanvasElement>>('canvas');
 
   /** Current camera zoom as a whole percentage, for the dock readout. */
   readonly zoomPercent = signal(100);
@@ -223,17 +232,87 @@ export class WorldCanvas implements OnDestroy {
   private static readonly MAX_ZOOM = 8;
   private static readonly ZOOM_STEP = 1.1;
 
+  // Interpolation state: the latest snapshot is the *target*; bees glide from
+  // where the previous snapshot placed them (prevBees, by id) toward it over
+  // the measured publish interval. See the class doc and {@link renderScene}.
+  private currSnapshot: WorldSnapshot | null = null;
+  private readonly prevBees = new Map<number, BeeSnapshot>();
+  /** `performance.now()` when {@link currSnapshot} arrived. */
+  private currArrivedAt = 0;
+  /** Smoothed gap between snapshot arrivals — the interpolation window. */
+  private snapshotIntervalMs = 100;
+  private animationFrame?: number;
+  /** Reused output of the per-bee lerp, so interpolation allocates nothing. */
+  private readonly lerpedPosition: Vec3 = { x: 0, y: 0, z: 0 };
+
+  // Viewport reporting (see {@link reportViewport}).
+  private static readonly VIEWPORT_MARGIN = 0.25;
+  private static readonly VIEWPORT_HYSTERESIS = 0.1;
+  private lastViewport?: ViewportRect;
+
   constructor() {
     // Build the three.js scene once the canvas element is in the DOM. This runs
     // only in the browser, so WebGL is never touched during SSR/prerender.
     afterNextRender(() => this.init());
 
-    // Redraw on every new snapshot (no-op until the renderer is initialised).
+    // Adopt every new snapshot as the interpolation target (rendering is a
+    // no-op until the renderer is initialised, but the state still tracks).
     effect(() => {
       const snapshot = this.sim.snapshot();
       if (snapshot) {
-        this.renderSnapshot(snapshot);
+        this.onSnapshot(snapshot);
       }
+    });
+  }
+
+  /**
+   * Adopt a freshly arrived snapshot: the previous one's bees become the lerp
+   * origins, the arrival gap feeds the smoothed interpolation window, and the
+   * animation loop is (re)armed. A snapshot whose tick went *backwards* is a
+   * discontinuity — a reshuffle or a reconnect — so interpolation is skipped
+   * for that frame rather than sweeping unrelated colonies into each other.
+   */
+  private onSnapshot(snapshot: WorldSnapshot): void {
+    const now = performance.now();
+    const prev = this.currSnapshot;
+    this.prevBees.clear();
+    if (prev && snapshot.tick >= prev.tick) {
+      // Clamp the gap: an off-cadence publish (a click landing mid-interval)
+      // or a stalled tab shouldn't whipsaw the window.
+      const gap = Math.min(1000, Math.max(1, now - this.currArrivedAt));
+      this.snapshotIntervalMs = 0.7 * this.snapshotIntervalMs + 0.3 * gap;
+      for (const bee of prev.bees) {
+        this.prevBees.set(bee.id, bee);
+      }
+    }
+    this.currSnapshot = snapshot;
+    this.currArrivedAt = now;
+    this.renderScene(0);
+    this.startInterpolation();
+  }
+
+  /**
+   * Run the interpolation loop until it catches up with the latest snapshot
+   * (alpha 1), then stop — a paused simulation costs no frames; the next
+   * arrival re-arms it. Outside the Angular zone: the loop only writes to the
+   * three.js scene, so change detection has nothing to see 60× a second.
+   */
+  private startInterpolation(): void {
+    if (this.animationFrame !== undefined || !this.renderer) {
+      return;
+    }
+    this.zone.runOutsideAngular(() => {
+      const step = () => {
+        const alpha = (performance.now() - this.currArrivedAt) / this.snapshotIntervalMs;
+        if (alpha < 1) {
+          this.renderScene(alpha);
+          this.animationFrame = requestAnimationFrame(step);
+        } else {
+          this.renderScene(1);
+          this.animationFrame = undefined;
+        }
+      };
+      this.animationFrame = requestAnimationFrame(step);
     });
   }
 
@@ -269,10 +348,7 @@ export class WorldCanvas implements OnDestroy {
   }
 
   private applyZoom(factor: number): void {
-    this.zoom = Math.min(
-      WorldCanvas.MAX_ZOOM,
-      Math.max(WorldCanvas.MIN_ZOOM, this.zoom * factor),
-    );
+    this.zoom = Math.min(WorldCanvas.MAX_ZOOM, Math.max(WorldCanvas.MIN_ZOOM, this.zoom * factor));
     this.zoomPercent.set(Math.round(this.zoom * 100));
     this.updateCamera();
     this.renderCurrent();
@@ -319,15 +395,21 @@ export class WorldCanvas implements OnDestroy {
     // Size the renderer to the canvas before the first draw, then render the
     // latest snapshot immediately if one already arrived.
     this.handleResize();
-    const snapshot = this.sim.snapshot();
-    if (snapshot) {
-      this.renderSnapshot(snapshot);
+    if (this.currSnapshot) {
+      this.renderScene(1);
     }
   }
 
-  private renderSnapshot(snapshot: WorldSnapshot): void {
+  /**
+   * Draw the world at interpolation fraction `alpha` between the previous and
+   * the latest snapshot: `0` is where the previous frame left every bee, `1`
+   * is the latest snapshot's exact positions. Membership, states, resources,
+   * and landmarks always come from the latest snapshot — only positions glide.
+   */
+  private renderScene(alpha: number): void {
     const { renderer, scene, camera } = this;
-    if (!renderer || !scene || !camera) {
+    const snapshot = this.currSnapshot;
+    if (!renderer || !scene || !camera || !snapshot) {
       return;
     }
 
@@ -348,7 +430,7 @@ export class WorldCanvas implements OnDestroy {
       this.beeObjects,
       snapshot.bees,
       (bee) => this.createBee(this.beeMaterialFor(bee), bee.beeClass),
-      (object, bee) => this.updateBee(object as THREE.Group, bee),
+      (object, bee) => this.updateBee(object as THREE.Group, bee, alpha),
     );
     this.reconcileEntities(
       this.flowerObjects,
@@ -412,15 +494,30 @@ export class WorldCanvas implements OnDestroy {
   }
 
   /**
-   * Refresh a live bee: recolour the body by state, place it (world-`y` flip),
-   * and turn it to face its velocity. On screen `y` is flipped, so the heading
-   * angle negates `vy`; a near-stationary bee keeps its previous facing.
+   * Refresh a live bee: recolour the body by state, place it (world-`y` flip)
+   * at the interpolated position — `alpha` of the way from where the previous
+   * snapshot had it to where the latest one does — and turn it to face its
+   * velocity. A bee absent from the previous snapshot (fresh spawn, or newly
+   * scrolled into the viewport) has no origin to glide from and sits at its
+   * latest position outright. On screen `y` is flipped, so the heading angle
+   * negates `vy`; a near-stationary bee keeps its previous facing.
    */
-  private updateBee(group: THREE.Group, bee: BeeSnapshot): void {
+  private updateBee(group: THREE.Group, bee: BeeSnapshot, alpha: number): void {
     (group.userData['body'] as THREE.Mesh).material = this.beeMaterialFor(bee);
     // Stamp the id so a click ray-hit on any body part resolves back to the bee.
     group.userData['beeId'] = bee.id;
-    this.placeAt(group, bee.position);
+
+    const prev = alpha < 1 ? this.prevBees.get(bee.id) : undefined;
+    if (prev) {
+      // Into the reused scratch vector — no allocation per bee per frame.
+      const lerped = this.lerpedPosition;
+      lerped.x = prev.position.x + (bee.position.x - prev.position.x) * alpha;
+      lerped.y = prev.position.y + (bee.position.y - prev.position.y) * alpha;
+      lerped.z = prev.position.z + (bee.position.z - prev.position.z) * alpha;
+      this.placeAt(group, lerped);
+    } else {
+      this.placeAt(group, bee.position);
+    }
 
     const vx = bee.velocity?.x ?? 0;
     const vy = bee.velocity?.y ?? 0;
@@ -545,9 +642,7 @@ export class WorldCanvas implements OnDestroy {
     }
     const wax = Math.max(0, waxGrams);
     const growth =
-      1 +
-      WorldCanvas.HIVE_MAX_WAX_GROWTH *
-        (wax / (wax + WorldCanvas.HIVE_WAX_GROWTH_HALF_LIFE));
+      1 + WorldCanvas.HIVE_MAX_WAX_GROWTH * (wax / (wax + WorldCanvas.HIVE_WAX_GROWTH_HALF_LIFE));
     const radius = this.hiveBaseRadius * growth;
     this.hive.scale.setScalar(radius);
     // Above the hive centre on screen (smaller screen-y ⇒ larger world-y).
@@ -587,6 +682,52 @@ export class WorldCanvas implements OnDestroy {
     camera.position.x = focus.x;
     camera.position.y = focus.y;
     camera.updateProjectionMatrix();
+    this.reportViewport();
+  }
+
+  /**
+   * Tell the simulation source what world rect the camera can see, so the
+   * server can cull off-screen bees from this client's stream (the wasm source
+   * no-ops it). Runs on every camera change — zoom, resize, follow-cam glide —
+   * so it is deliberately cheap and quiet: the rect is padded by
+   * {@link VIEWPORT_MARGIN} (bees enter the screen before they enter the
+   * stream, and small drifts stay inside the last report), and a re-send only
+   * happens when an edge moves by more than {@link VIEWPORT_HYSTERESIS} of the
+   * view. The world-`y` flip {@link placeAt} bakes into scene coordinates is
+   * inverted here, so the rect is in true world space like the wire expects.
+   */
+  private reportViewport(): void {
+    const camera = this.camera;
+    if (!camera || !this.worldWidth || !this.worldHeight) {
+      return;
+    }
+    const pad = 1 + WorldCanvas.VIEWPORT_MARGIN;
+    const halfW = (((camera.right - camera.left) / 2) * pad) / camera.zoom;
+    const halfH = (((camera.top - camera.bottom) / 2) * pad) / camera.zoom;
+    const cx = camera.position.x;
+    const worldCy = this.worldHeight - camera.position.y;
+    const rect: ViewportRect = {
+      minX: cx - halfW,
+      maxX: cx + halfW,
+      minY: worldCy - halfH,
+      maxY: worldCy + halfH,
+    };
+
+    const last = this.lastViewport;
+    if (last) {
+      const tolX = (rect.maxX - rect.minX) * WorldCanvas.VIEWPORT_HYSTERESIS;
+      const tolY = (rect.maxY - rect.minY) * WorldCanvas.VIEWPORT_HYSTERESIS;
+      if (
+        Math.abs(rect.minX - last.minX) < tolX &&
+        Math.abs(rect.maxX - last.maxX) < tolX &&
+        Math.abs(rect.minY - last.minY) < tolY &&
+        Math.abs(rect.maxY - last.maxY) < tolY
+      ) {
+        return;
+      }
+    }
+    this.lastViewport = rect;
+    this.sim.setViewport(rect);
   }
 
   /**
@@ -661,8 +802,7 @@ export class WorldCanvas implements OnDestroy {
   setTool(tool: PointerTool): void {
     this.tool.set(tool);
     // A crosshair while placing signals the click will drop something.
-    this.canvas().nativeElement.style.cursor =
-      tool === 'follow' ? 'pointer' : 'crosshair';
+    this.canvas().nativeElement.style.cursor = tool === 'follow' ? 'pointer' : 'crosshair';
   }
 
   /**
@@ -776,6 +916,9 @@ export class WorldCanvas implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    if (this.animationFrame !== undefined) {
+      cancelAnimationFrame(this.animationFrame);
+    }
     const canvas = this.canvas().nativeElement;
     canvas.removeEventListener('wheel', this.onWheel);
     canvas.removeEventListener('click', this.onClick);
