@@ -1,7 +1,10 @@
 //! Colony simulator server.
 //!
 //! Runs the simulation ([`sim`]) and exposes it:
-//! - `GET /ws` — streams [`colony_core::WorldSnapshot`] frames over WebSocket.
+//! - `GET /ws` — streams binary wire frames (see `colony_core::wire`) over
+//!   WebSocket: the roster message when a client hasn't seen the current
+//!   membership yet, then a motion message per tick. Frames are encoded once
+//!   by the sim task and shared; this handler only forwards bytes.
 //! - `GET /api/health` — liveness probe.
 //! - `POST /api/control` — start / pause / reset the simulation.
 //!
@@ -102,14 +105,17 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-/// Per-connection loop: push the latest snapshot whenever it changes, and
-/// watch for the client closing the connection.
+/// Per-connection loop: forward the latest encoded frame whenever it changes,
+/// and watch for the client closing the connection.
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    let mut rx = state.sim.snapshots.clone();
+    let mut rx = state.sim.frames.clone();
+    // Roster version this client has been sent; `None` until the first frame,
+    // so a fresh connection always receives the roster before any motion.
+    let mut sent_roster: Option<u32> = None;
 
     // Send the current frame right away so a fresh client renders immediately.
     let initial = rx.borrow_and_update().clone();
-    if send_snapshot(&mut socket, &initial).await.is_err() {
+    if send_frame(&mut socket, &initial, &mut sent_roster).await.is_err() {
         return;
     }
 
@@ -119,8 +125,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 if changed.is_err() {
                     break; // simulation task gone
                 }
-                let snapshot = rx.borrow_and_update().clone();
-                if send_snapshot(&mut socket, &snapshot).await.is_err() {
+                let frame = rx.borrow_and_update().clone();
+                if send_frame(&mut socket, &frame, &mut sent_roster).await.is_err() {
                     break;
                 }
             }
@@ -136,11 +142,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
-/// Serialize a snapshot to JSON and send it as a text frame.
-async fn send_snapshot(
+/// Send one encoded tick as binary frames: the roster first if this client
+/// hasn't seen the current version (the watch channel may have coalesced past
+/// the frame that introduced it), then the motion. The bytes were encoded once
+/// by the sim task; the `to_vec` here is a plain memcpy into the socket's
+/// message, not a re-serialization.
+async fn send_frame(
     socket: &mut WebSocket,
-    snapshot: &colony_core::WorldSnapshot,
+    frame: &sim::WireFrame,
+    sent_roster: &mut Option<u32>,
 ) -> Result<(), axum::Error> {
-    let json = serde_json::to_string(snapshot).expect("snapshot serializes");
-    socket.send(Message::Text(json)).await
+    if *sent_roster != Some(frame.roster_version) {
+        socket.send(Message::Binary(frame.roster.to_vec())).await?;
+        *sent_roster = Some(frame.roster_version);
+    }
+    socket.send(Message::Binary(frame.motion.to_vec())).await
 }

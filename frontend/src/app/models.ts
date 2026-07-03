@@ -1,6 +1,10 @@
 /**
- * Wire types mirroring `colony_core::snapshot` on the Rust side.
+ * Snapshot types mirroring `colony_core::snapshot` on the Rust side.
  * Keep these in sync with `backend/colony-core/src/snapshot.rs`.
+ *
+ * These are the *parsed* shapes the app consumes. On the wire they travel as
+ * the compact binary format defined in `backend/colony-core/src/wire.rs` and
+ * decoded by `snapshot-codec.ts` — that pair is its own mirrored contract.
  */
 
 export interface Vec3 {
@@ -28,13 +32,7 @@ export interface Bounds {
  * the queen lays eggs (or rests), and drones loaf/fly (or rest).
  */
 export type BeeState =
-  | 'wandering'
-  | 'foraging'
-  | 'resting'
-  | 'building_comb'
-  | 'laying_eggs'
-  | 'loafing'
-  | 'flying';
+  'wandering' | 'foraging' | 'resting' | 'building_comb' | 'laying_eggs' | 'loafing' | 'flying';
 
 /** The caste a bee belongs to, mirroring the Rust `BeeClass` enum. */
 export type BeeClass = 'queen' | 'worker' | 'drone';

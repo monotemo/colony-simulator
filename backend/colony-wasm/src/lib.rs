@@ -5,18 +5,21 @@
 //! backend server is available. The native Axum server path remains the
 //! authority for local development and future multi-client scenarios.
 
-use colony_core::Engine;
+use colony_core::{Engine, WireEncoder};
 use wasm_bindgen::prelude::*;
 
 /// A simulation engine exposed to JavaScript.
 ///
 /// Mirrors the small slice of [`Engine`] the frontend needs: advance time,
-/// reset, and read a snapshot. The snapshot is returned as a JSON string in the
-/// exact `WorldSnapshot` shape the WebSocket transport already sends, so the
-/// frontend parses both identically.
+/// reset, and read the current state. State crosses the boundary as the same
+/// binary wire packet the WebSocket transport sends (see `colony_core::wire`),
+/// so the frontend decodes both transports with one codec — and the old
+/// JSON-string round-trip (serialize in Rust, copy, `JSON.parse` in JS) is
+/// gone.
 #[wasm_bindgen]
 pub struct WasmEngine {
     engine: Engine,
+    encoder: WireEncoder,
 }
 
 #[wasm_bindgen]
@@ -29,6 +32,7 @@ impl WasmEngine {
     pub fn new(seed: u32) -> WasmEngine {
         WasmEngine {
             engine: Engine::from_seed(seed as u64),
+            encoder: WireEncoder::new(),
         }
     }
 
@@ -53,9 +57,22 @@ impl WasmEngine {
         self.engine.add_nectar_at(x, y);
     }
 
-    /// Serialize the current world state as a `WorldSnapshot` JSON string.
-    pub fn snapshot_json(&self) -> String {
-        serde_json::to_string(&self.engine.snapshot()).expect("snapshot serializes")
+    /// Encode the current world state as one binary wire packet.
+    ///
+    /// The packet is the motion message for this tick, preceded by the roster
+    /// message whenever the colony's membership changed since the last call
+    /// (and on the very first call) — exactly the byte stream the WebSocket
+    /// transport sends, concatenated, so `snapshot-codec.ts` decodes both.
+    pub fn tick_frame(&mut self) -> Vec<u8> {
+        let frames = self.encoder.encode(&self.engine.snapshot());
+        if frames.roster_changed {
+            let mut packet = Vec::with_capacity(frames.roster.len() + frames.motion.len());
+            packet.extend_from_slice(&frames.roster);
+            packet.extend_from_slice(&frames.motion);
+            packet
+        } else {
+            frames.motion
+        }
     }
 }
 

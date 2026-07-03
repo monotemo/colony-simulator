@@ -3,15 +3,23 @@
 //! The engine lives entirely inside one Tokio task. The outside world talks to
 //! it through two channels:
 //! - an [`mpsc`] command channel *in* (start / pause / reset), and
-//! - a [`watch`] channel *out* carrying the latest [`WorldSnapshot`].
+//! - a [`watch`] channel *out* carrying the latest [`WireFrame`] — the tick
+//!   already encoded to wire bytes (see `colony_core::wire`), **once**, here.
+//!   Connections only forward those shared bytes, so the encode cost no longer
+//!   scales with the number of clients the way per-connection JSON did.
 //!
 //! A `watch` channel is the right tool for the outbound side: clients only ever
-//! want the most recent frame, not a backlog of every historical tick.
+//! want the most recent frame, not a backlog of every historical tick. Because
+//! a slow client can therefore *skip* frames, the roster (the rarely-changing
+//! membership message) rides along inside every `WireFrame` with its version:
+//! coalescing can never lose it, and each connection re-sends it only when its
+//! peer hasn't seen the current version yet.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use colony_core::{Engine, WorldSnapshot};
+use colony_core::{Engine, WireEncoder};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
@@ -62,13 +70,44 @@ pub enum Command {
     AddNectar { x: f64, y: f64 },
 }
 
+/// One tick, encoded to wire bytes exactly once and shared by every client.
+///
+/// `roster` is always the *current* roster message (not just the last change),
+/// so a connection that joined late — or skipped frames on the coalescing
+/// watch channel — can always catch up from the latest frame alone. The `Arc`s
+/// make the per-client clone a refcount bump, not a copy.
+#[derive(Clone)]
+pub struct WireFrame {
+    /// Version of the roster in `roster`; connections track what they've sent.
+    pub roster_version: u32,
+    /// The complete current roster message (membership: bounds, castes, resources).
+    pub roster: Arc<[u8]>,
+    /// This tick's motion message (positions, velocities, energy, states).
+    pub motion: Arc<[u8]>,
+}
+
 /// Handles for talking to a running simulation task.
 #[derive(Clone)]
 pub struct SimHandle {
-    /// Latest world snapshot; subscribe with `.clone()` per WebSocket client.
-    pub snapshots: watch::Receiver<WorldSnapshot>,
+    /// Latest encoded tick; subscribe with `.clone()` per WebSocket client.
+    pub frames: watch::Receiver<WireFrame>,
     /// Send control commands to the simulation task.
     pub commands: mpsc::Sender<Command>,
+}
+
+/// Encode the engine's current state and publish it to subscribers.
+fn publish(engine: &Engine, encoder: &mut WireEncoder, tx: &watch::Sender<WireFrame>) {
+    let _ = tx.send(encode_frame(engine, encoder));
+}
+
+/// Encode one tick into the shared [`WireFrame`].
+fn encode_frame(engine: &Engine, encoder: &mut WireEncoder) -> WireFrame {
+    let frames = encoder.encode(&engine.snapshot());
+    WireFrame {
+        roster_version: frames.roster_version,
+        roster: frames.roster,
+        motion: frames.motion.into(),
+    }
 }
 
 /// Spawn the simulation task and return handles to it.
@@ -77,7 +116,8 @@ pub struct SimHandle {
 pub fn spawn() -> SimHandle {
     // Seed from entropy so each server launch grows a different colony.
     let mut engine = Engine::from_seed(entropy_seed());
-    let (snap_tx, snap_rx) = watch::channel(engine.snapshot());
+    let mut encoder = WireEncoder::new();
+    let (snap_tx, snap_rx) = watch::channel(encode_frame(&engine, &mut encoder));
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
 
     tokio::spawn(async move {
@@ -101,7 +141,7 @@ pub fn spawn() -> SimHandle {
                         engine.reset_with_seed(entropy_seed());
                         // Publish immediately so clients see the reset even
                         // while paused.
-                        let _ = snap_tx.send(engine.snapshot());
+                        publish(&engine, &mut encoder, &snap_tx);
                     }
                     Command::SetSpeed(multiplier) => {
                         // Ignore non-positive/NaN multipliers; re-arm the timer
@@ -115,24 +155,24 @@ pub fn spawn() -> SimHandle {
                     Command::SpawnBee { x, y } => {
                         engine.spawn_worker_at(x, y);
                         // Publish so the added bee shows up at once, even paused.
-                        let _ = snap_tx.send(engine.snapshot());
+                        publish(&engine, &mut encoder, &snap_tx);
                     }
                     Command::AddNectar { x, y } => {
                         engine.add_nectar_at(x, y);
-                        let _ = snap_tx.send(engine.snapshot());
+                        publish(&engine, &mut encoder, &snap_tx);
                     }
                 }
             }
 
             if running {
                 engine.step(dt);
-                let _ = snap_tx.send(engine.snapshot());
+                publish(&engine, &mut encoder, &snap_tx);
             }
         }
     });
 
     SimHandle {
-        snapshots: snap_rx,
+        frames: snap_rx,
         commands: cmd_tx,
     }
 }

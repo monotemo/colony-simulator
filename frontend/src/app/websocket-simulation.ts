@@ -1,6 +1,7 @@
 import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
 import { SimulationService } from './simulation.service';
 import { ControlCommand, WorldSnapshot } from './models';
+import { SnapshotDecoder } from './snapshot-codec';
 import { environment } from '../environments/environment';
 
 /** First reconnect delay; doubles per failed attempt up to the cap below. */
@@ -15,6 +16,10 @@ const MAX_RECONNECT_DELAY_MS = 15000;
 /**
  * Streams the latest {@link WorldSnapshot} from the Rust server over a
  * WebSocket and sends control commands over REST.
+ *
+ * Frames arrive as the binary wire format (see {@link SnapshotDecoder}): a
+ * roster message whenever this connection hasn't seen the current colony
+ * membership, then one compact motion message per tick — not JSON.
  *
  * URLs come from `environment.backendUrl`: when empty (dev) they resolve to the
  * page origin, so the same build works behind the Angular dev-server proxy and
@@ -117,7 +122,11 @@ export class WebSocketSimulationService extends SimulationService {
 
   private connect(): void {
     const socket = new WebSocket(this.socketUrl());
+    socket.binaryType = 'arraybuffer';
     this.socket = socket;
+    // A fresh decoder per connection: the server sends the roster before any
+    // motion a new connection sees, so no state may carry across reconnects.
+    const decoder = new SnapshotDecoder();
 
     socket.onopen = () =>
       this.zone.run(() => {
@@ -127,15 +136,16 @@ export class WebSocketSimulationService extends SimulationService {
       });
 
     socket.onmessage = (event) => {
-      let parsed: WorldSnapshot;
-      try {
-        parsed = JSON.parse(event.data as string);
-      } catch {
+      if (!(event.data instanceof ArrayBuffer)) {
         return;
+      }
+      const snapshot = decoder.decode(event.data);
+      if (!snapshot) {
+        return; // roster-only frame; the next motion completes the picture
       }
       // Snapshots arrive ~30x/sec; run inside the zone so the signal update
       // drives change detection.
-      this.zone.run(() => this.snapshot.set(parsed));
+      this.zone.run(() => this.snapshot.set(snapshot));
     };
 
     socket.onclose = () => {

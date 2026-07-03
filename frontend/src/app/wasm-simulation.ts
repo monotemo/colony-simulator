@@ -1,6 +1,7 @@
 import { Injectable, signal, NgZone, inject, DestroyRef } from '@angular/core';
 import { SimulationService } from './simulation.service';
 import { WorldSnapshot } from './models';
+import { SnapshotDecoder } from './snapshot-codec';
 
 /** Tick rate of the in-browser engine, matching the server's 30 Hz. */
 const TICK_HZ = 30;
@@ -23,7 +24,13 @@ interface WasmEngine {
   spawn_bee(x: number, y: number): void;
   /** Drop a nectar source at a world-space point (interactive "add nectar"). */
   add_nectar(x: number, y: number): void;
-  snapshot_json(): string;
+  /**
+   * The current state as one binary wire packet — this tick's motion message,
+   * preceded by the roster message when membership changed (and on the first
+   * call). The same byte stream the WebSocket transport carries, so both
+   * transports share {@link SnapshotDecoder}.
+   */
+  tick_frame(): Uint8Array;
   free(): void;
 }
 
@@ -52,6 +59,8 @@ export class WasmSimulationService extends SimulationService {
   readonly running = signal(true);
 
   private engine?: WasmEngine;
+  /** Decodes the engine's binary wire packets into parsed snapshots. */
+  private readonly decoder = new SnapshotDecoder();
   private timer?: ReturnType<typeof setInterval>;
   private disposed = false;
   /** Tick-rate multiplier set via {@link setSpeed} (0.5×, 1×, 2×). */
@@ -124,21 +133,28 @@ export class WasmSimulationService extends SimulationService {
   private startLoop(): void {
     clearInterval(this.timer);
     const dt = 1 / TICK_HZ;
-    this.timer = setInterval(() => {
-      if (!this.running() || !this.engine) {
-        return;
-      }
-      this.engine.step(dt);
-      this.publish();
-    }, 1000 / TICK_HZ / this.speed);
+    this.timer = setInterval(
+      () => {
+        if (!this.running() || !this.engine) {
+          return;
+        }
+        this.engine.step(dt);
+        this.publish();
+      },
+      1000 / TICK_HZ / this.speed,
+    );
   }
 
   private publish(): void {
     if (!this.engine) {
       return;
     }
-    const snapshot = JSON.parse(this.engine.snapshot_json()) as WorldSnapshot;
-    this.zone.run(() => this.snapshot.set(snapshot));
+    // The engine includes the roster in the packet whenever it changed, so a
+    // packet always decodes to a full snapshot here.
+    const snapshot = this.decoder.decode(this.engine.tick_frame());
+    if (snapshot) {
+      this.zone.run(() => this.snapshot.set(snapshot));
+    }
   }
 
   private dispose(): void {
