@@ -23,7 +23,8 @@ export type PointerTool = 'follow' | 'spawnBee' | 'addNectar';
 /**
  * Renders the world with three.js in the "Hearth" honey-and-hive palette: bees
  * as small striped, winged shapes tinted by behavior state and turned to face
- * their heading, nectar resources as terracotta discs, and a central hive with
+ * their heading, nectar resources as terracotta discs, and a central beehive —
+ * a tiered skep silhouette that domes outward as the colony banks wax — with
  * its queen just above it.
  *
  * The view is a top-down orthographic camera looking straight down the world's
@@ -145,12 +146,51 @@ export class WorldCanvas implements OnDestroy {
   private readonly flowerMaterial = this.glowMaterial(0xc9663c, 0xe68a5e, 0.25);
 
   // Central landmarks, derived from the world bounds (no wire data yet).
-  private readonly hiveGeometry = new THREE.CircleGeometry(1, 6);
-  private readonly hiveMaterial = this.glowMaterial(0xd5901f, 0xf3ba4d, 0.55);
+  //
+  // The hive is a small "skep" silhouette: horizontal bands tapering from a
+  // wide base to a cap knob, built as a flat sprite-like Group (like a bee or
+  // flower) from stacked ellipses rather than the plain hexagon disc it used
+  // to be. Coordinates below are in an unscaled unit space; the whole group
+  // is scaled by a world-derived, wax-grown radius (see updateHiveScale), so
+  // this layout only needs to look like a hive at scale 1.
+  private static readonly HIVE_TIERS: ReadonlyArray<{ rx: number; ry: number; y: number }> = [
+    { rx: 1.0, ry: 0.34, y: -0.62 },
+    { rx: 0.84, ry: 0.32, y: -0.34 },
+    { rx: 0.66, ry: 0.3, y: -0.08 },
+    { rx: 0.48, ry: 0.26, y: 0.16 },
+    { rx: 0.28, ry: 0.22, y: 0.36 },
+  ];
+  private readonly hiveTierGeometries = WorldCanvas.HIVE_TIERS.map(
+    ({ rx, ry }) => new THREE.ShapeGeometry(this.ellipse(rx, ry), 24),
+  );
+  private readonly hiveKnobGeometry = new THREE.CircleGeometry(0.14, 16);
+  private readonly hiveEntranceGeometry = new THREE.ShapeGeometry(this.ellipse(0.16, 0.09), 16);
+  // Two amber tones alternated band-to-band for the woven-straw texture.
+  private readonly hiveBandMaterials = [
+    this.glowMaterial(0xf0b955, 0xffce7a, 0.5),
+    this.glowMaterial(0xc07f22, 0xe0a13f, 0.4),
+  ];
+  private readonly hiveKnobMaterial = this.glowMaterial(0xd5901f, 0xf3ba4d, 0.6);
+
   private readonly queenGeometry = new THREE.SphereGeometry(1, 16, 16);
   private readonly queenMaterial = this.glowMaterial(0xe0a12b, 0xffe08a, 0.7);
-  private hive?: THREE.Mesh;
+  private hive?: THREE.Group;
   private queen?: THREE.Mesh;
+  // World-space centre and unscaled (wax = 0) radius the hive was last built
+  // for; wax growth multiplies this radius fresh every snapshot (see
+  // updateHiveScale) rather than being baked into the mesh once.
+  private hiveCenter = { x: 0, y: 0 };
+  private hiveBaseRadius = 0;
+
+  // Wax-driven hive growth: an easing approach toward HIVE_MAX_WAX_GROWTH as
+  // waxGrams climbs, not a linear scale, so a freshly-founded colony (0 g)
+  // still reads as a recognisable hive and the mound doesn't balloon without
+  // bound over a long-running session. The half-life is small because a
+  // colony only ever banks gram fractions in a session (workers secrete
+  // scales at WAX_SCALES_PER_SECOND — see world.rs) — a linear or
+  // large-denominator curve would look static.
+  private static readonly HIVE_MAX_WAX_GROWTH = 0.6;
+  private static readonly HIVE_WAX_GROWTH_HALF_LIFE = 0.02;
 
   // A luminous ring laid over the followed bee so the target reads at a glance.
   // Unlit (MeshBasicMaterial) so it stays bright regardless of scene lighting,
@@ -301,6 +341,8 @@ export class WorldCanvas implements OnDestroy {
       this.rebuildLandmarks();
       this.updateCamera();
     }
+    // Every snapshot, not just on a bounds change: wax accrues tick by tick.
+    this.updateHiveScale(snapshot.waxGrams);
 
     this.reconcileEntities(
       this.beeObjects,
@@ -433,31 +475,83 @@ export class WorldCanvas implements OnDestroy {
   }
 
   /**
-   * Place the hive at the world centre and the queen just above it, scaled to
-   * the world size. They have no wire representation yet, so they are derived
-   * purely from the bounds — one hive, one queen, matching the rail's counts.
+   * Place the hive at the world centre and the queen just above it, sized to
+   * the world bounds. They have no wire representation yet, so their position
+   * and base size are derived purely from the bounds — one hive, one queen,
+   * matching the rail's counts. The hive's actual on-screen radius is
+   * re-derived from this base every snapshot (see {@link updateHiveScale}),
+   * since it also grows with banked wax.
    */
   private rebuildLandmarks(): void {
     const cx = this.worldWidth / 2;
     const cy = this.worldHeight / 2;
     const unit = Math.min(this.worldWidth, this.worldHeight);
-    const hiveRadius = unit * 0.06;
+    this.hiveCenter = { x: cx, y: cy };
+    this.hiveBaseRadius = unit * 0.06;
     const queenRadius = unit * 0.012;
 
     if (!this.hive) {
-      this.hive = new THREE.Mesh(this.hiveGeometry, this.hiveMaterial);
+      this.hive = this.createHive();
       this.scene!.add(this.hive);
     }
     this.hive.position.set(cx, cy, 0.5);
-    this.hive.scale.setScalar(hiveRadius);
 
     if (!this.queen) {
       this.queen = new THREE.Mesh(this.queenGeometry, this.queenMaterial);
       this.scene!.add(this.queen);
     }
-    // Above the hive centre on screen (smaller screen-y ⇒ larger world-y).
-    this.queen.position.set(cx, cy + hiveRadius * 0.6, 1);
     this.queen.scale.setScalar(queenRadius);
+  }
+
+  /**
+   * Assemble the hive landmark from its tier bands, cap knob, and entrance
+   * notch (see {@link HIVE_TIERS}). Built once and reused — only its overall
+   * scale and the queen's resting height change afterward.
+   */
+  private createHive(): THREE.Group {
+    const hive = new THREE.Group();
+
+    WorldCanvas.HIVE_TIERS.forEach(({ y }, i) => {
+      const band = new THREE.Mesh(
+        this.hiveTierGeometries[i],
+        this.hiveBandMaterials[i % this.hiveBandMaterials.length],
+      );
+      // Tiny z steps so each band draws cleanly over the one beneath it.
+      band.position.set(0, y, i * 0.01);
+      hive.add(band);
+    });
+
+    const topZ = WorldCanvas.HIVE_TIERS.length * 0.01;
+    const knob = new THREE.Mesh(this.hiveKnobGeometry, this.hiveKnobMaterial);
+    knob.position.set(0, 0.54, topZ);
+    hive.add(knob);
+
+    // Dark entrance notch near the base, reusing the bee markings' near-black
+    // tone rather than a bespoke material.
+    const entrance = new THREE.Mesh(this.hiveEntranceGeometry, this.beeMarkingMaterial);
+    entrance.position.set(0, -0.8, topZ + 0.01);
+    hive.add(entrance);
+
+    return hive;
+  }
+
+  /**
+   * Rescale the hive by banked wax (see {@link HIVE_MAX_WAX_GROWTH}) and keep
+   * the queen resting just above its now-grown crown.
+   */
+  private updateHiveScale(waxGrams: number): void {
+    if (!this.hive || !this.queen) {
+      return;
+    }
+    const wax = Math.max(0, waxGrams);
+    const growth =
+      1 +
+      WorldCanvas.HIVE_MAX_WAX_GROWTH *
+        (wax / (wax + WorldCanvas.HIVE_WAX_GROWTH_HALF_LIFE));
+    const radius = this.hiveBaseRadius * growth;
+    this.hive.scale.setScalar(radius);
+    // Above the hive centre on screen (smaller screen-y ⇒ larger world-y).
+    this.queen.position.set(this.hiveCenter.x, this.hiveCenter.y + radius * 0.6, 1);
   }
 
   /** Frame the whole world, letterboxing to preserve aspect ratio. */
@@ -698,8 +792,15 @@ export class WorldCanvas implements OnDestroy {
     this.beeWingMaterial.dispose();
     this.flowerGeometry.dispose();
     this.flowerMaterial.dispose();
-    this.hiveGeometry.dispose();
-    this.hiveMaterial.dispose();
+    for (const geometry of this.hiveTierGeometries) {
+      geometry.dispose();
+    }
+    this.hiveKnobGeometry.dispose();
+    this.hiveEntranceGeometry.dispose();
+    for (const material of this.hiveBandMaterials) {
+      material.dispose();
+    }
+    this.hiveKnobMaterial.dispose();
     this.queenGeometry.dispose();
     this.queenMaterial.dispose();
     this.highlightGeometry.dispose();
