@@ -177,26 +177,26 @@ mod tests {
 
     #[test]
     fn snapshot_serializes_honey_with_camelcase_key() {
-        // The store field is `honey_stored` in Rust but must reach the frontend
-        // as `honeyStored`, the key the rail already reads. Guard the rename so
-        // the wire contract can't silently drift back to snake_case.
+        // Snapshots ship as the binary wire format now (see `crate::wire`), but
+        // a JSON dump stays a debug view of the parsed `models.ts` shape — so
+        // the `honeyStored` rename the frontend types expect must hold.
         let engine = Engine::seeded();
         let json = serde_json::to_string(&engine.snapshot()).expect("serialize");
         assert!(
             json.contains("\"honeyStored\""),
-            "wire key should be camelCase honeyStored: {json}"
+            "debug-JSON key should be camelCase honeyStored: {json}"
         );
     }
 
     #[test]
     fn snapshot_serializes_caste_and_wax_wire_keys() {
-        // The new bee fields must reach the frontend under the agreed wire keys:
-        // multi-word fields camelCase, enum values snake_case. Guard them so the
-        // contract with `models.ts` can't silently drift.
+        // As above: the JSON form is a debug view mirroring `models.ts` —
+        // multi-word fields camelCase, enum values snake_case — and must not
+        // silently drift from the shape the frontend parses.
         let engine = Engine::seeded();
         let json = serde_json::to_string(&engine.snapshot()).expect("serialize");
         for key in ["\"beeClass\"", "\"sex\"", "\"waxScales\"", "\"waxGrams\""] {
-            assert!(json.contains(key), "wire should carry {key}: {json}");
+            assert!(json.contains(key), "debug JSON should carry {key}: {json}");
         }
         // The seeded colony has a queen, so her caste must serialize snake_case.
         assert!(json.contains("\"queen\""), "caste should be snake_case: {json}");

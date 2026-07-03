@@ -19,16 +19,19 @@ fixed `DEFAULT_SEED`.
 
 ```
 backend/                 Rust workspace (Cargo)
-  colony-core/           Pure simulation: World, Bee, Engine, Vec3, snapshots, RNG.
-                         No I/O, no async — the seeded, reproducible-per-seed
-                         heart, fully unit-tested. Entropy enters only at the host.
+  colony-core/           Pure simulation: World, Bee, Engine, Vec3, snapshots,
+                         RNG, and the binary wire codec (wire.rs). No I/O, no
+                         async — the seeded, reproducible-per-seed heart, fully
+                         unit-tested. Entropy enters only at the host.
   colony-server/         Axum server: runs the engine in a Tokio task, streams
-                         WorldSnapshot over /ws, accepts /api/control
+                         binary wire frames over /ws (encoded once per tick,
+                         shared by every client), accepts /api/control
                          (start/pause/reset/set_speed/spawn_bee/add_nectar).
   colony-wasm/           wasm-bindgen wrapper exposing the engine to JS (WasmEngine).
 frontend/                Angular 20 app (standalone components, signals)
   src/app/
-    models.ts            TS wire types — MUST mirror colony-core/src/snapshot.rs.
+    models.ts            Parsed snapshot types — MUST mirror colony-core/src/snapshot.rs.
+    snapshot-codec.ts    Binary wire decoder — MUST mirror colony-core/src/wire.rs.
     simulation.service.ts Abstract DI token + contract for a simulation source.
     websocket-simulation.ts / wasm-simulation.ts  The two implementations.
     app.*                The "Hearth" dashboard (header, world, stats rail).
@@ -56,12 +59,21 @@ frontend/                Angular 20 app (standalone components, signals)
   New world-perturbation commands follow this path end to end: a `Command`
   variant + handler in `colony-server/src/sim.rs`, a `WasmEngine` method, a
   `ControlCommand` shape in `models.ts`, and both transport implementations.
-- **The wire format is a contract.** `frontend/src/app/models.ts` is a
-  hand-maintained mirror of `backend/colony-core/src/snapshot.rs` (serde
-  `snake_case`). Change one, change the other. Fields the engine doesn't emit
-  yet (bee `energy`, `honeyStored`, the `foraging`/`resting` states) are typed
-  as optional/forward-looking on the TS side so the UI lights up automatically
-  once the backend reports them — don't fake values for them in the UI.
+- **The wire format is a contract — two mirrored pairs now.**
+  `frontend/src/app/models.ts` mirrors `backend/colony-core/src/snapshot.rs`
+  (the *parsed* shapes the app consumes), and `frontend/src/app/snapshot-codec.ts`
+  mirrors `backend/colony-core/src/wire.rs` (the binary encoding those shapes
+  travel as). Change one side, change the other. The binary pair is pinned by a
+  shared byte-for-byte fixture — `fixture_encodes_to_pinned_bytes` in `wire.rs`
+  and the same hex strings in `snapshot-codec.spec.ts` — update both together.
+  On the wire, immutable identity (ids, castes, resources, bounds) rides a rare
+  versioned *roster* message; per-tick dynamics ride a compact f32 *motion*
+  message keyed by roster index, so don't add an immutable field to motion or a
+  per-tick field to roster. The server encodes each tick **once** and fans the
+  shared bytes out to every socket; snapshot JSON survives only as a debug view.
+  Fields the engine doesn't emit yet are typed as optional/forward-looking on
+  the TS side so the UI lights up automatically once the backend reports them —
+  don't fake values for them in the UI.
 - **Rendering is snapshot-driven, not loop-driven.** `world-canvas` redraws only
   when a new snapshot arrives, on zoom, or on resize — there is no
   `requestAnimationFrame` loop. Meshes are reconciled by stable entity `id`;

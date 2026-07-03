@@ -1,8 +1,15 @@
-//! Serializable snapshot types — the wire format sent to clients.
+//! Serializable snapshot types — the render-ready view of the world.
 //!
 //! Kept separate from the live simulation structs so internal fields can change
 //! without breaking the client protocol. A snapshot is a flat, render-ready
 //! view of the world at a single tick.
+//!
+//! Snapshots no longer ship as JSON: the wire encoding is the compact binary
+//! format in [`crate::wire`] (roster + motion messages), decoded by the
+//! frontend's `snapshot-codec.ts` back into this exact shape (`models.ts`).
+//! The serde derives are kept — the camelCase renames still match `models.ts`,
+//! so a JSON dump of a snapshot remains a faithful debug view of what the
+//! client parses.
 
 use serde::{Deserialize, Serialize};
 

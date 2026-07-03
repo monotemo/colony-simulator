@@ -236,7 +236,6 @@ name = "colony-wasm"
 version = "0.1.0"
 dependencies = [
  "colony-core",
- "serde_json",
  "wasm-bindgen",
 ]
 
