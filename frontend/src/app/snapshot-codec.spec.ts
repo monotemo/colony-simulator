@@ -126,6 +126,16 @@ describe('SnapshotDecoder', () => {
     expect(snapshot.honeyStored).toBe(FIXTURE_SNAPSHOT.honeyStored);
   });
 
+  it('drops a sparse frame whose roster index is out of range', () => {
+    const decoder = new SnapshotDecoder();
+    decoder.decode(bytes(ROSTER_HEX));
+    const corrupt = bytes(SPARSE_MOTION_HEX);
+    corrupt[64] = 9; // the lone roster index (u32 LE at offset 64) — roster has 2 bees
+    expect(decoder.decode(corrupt)).toBeNull();
+    // Warn-and-drop, not a thrown decode: the next good frame still lands.
+    expect(decoder.decode(bytes(SPARSE_MOTION_HEX))).not.toBeNull();
+  });
+
   it('drops a motion frame with no roster to join against', () => {
     const decoder = new SnapshotDecoder();
     expect(decoder.decode(bytes(MOTION_HEX))).toBeNull();

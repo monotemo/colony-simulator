@@ -220,6 +220,24 @@ export class SnapshotDecoder {
       ? (i: number) => view.getUint32(indices + i * 4, true)
       : (i: number) => i;
 
+    // Bounds-check every sparse index before dereferencing the roster. The
+    // encoder can't produce one out of range today, but its only Rust-side
+    // guard is a debug assert that compiles out in release — a corrupted or
+    // buggy frame must get the same warn-and-drop treatment as any other
+    // malformed frame, not throw out of the transport's message handler.
+    if (sparse) {
+      for (let i = 0; i < beeCount; i++) {
+        const index = rosterIndex(i);
+        if (index >= roster.bees.length) {
+          console.warn(
+            `sparse motion frame carries roster index ${index} beyond the ` +
+              `${roster.bees.length}-bee roster; dropping`,
+          );
+          return { snapshot: null, next };
+        }
+      }
+    }
+
     // Struct-of-arrays: each block is contiguous, per-bee values by index.
     const positions = indices + (sparse ? beeCount * 4 : 0);
     const velocities = positions + beeCount * 12;

@@ -244,6 +244,22 @@ export class WorldCanvas implements OnDestroy {
   private animationFrame?: number;
   /** Reused output of the per-bee lerp, so interpolation allocates nothing. */
   private readonly lerpedPosition: Vec3 = { x: 0, y: 0, z: 0 };
+  /**
+   * An arrival gap beyond this is a stalled stream — a reconnect after an
+   * outage, a long-hidden tab — not a publish interval. The tick counter alone
+   * can't catch it (the sim kept running, so the tick *grew*), but gliding
+   * bees from positions that old is the same unrelated-worlds sweep the
+   * tick-regression guard exists to prevent. Comfortably above the 1000 ms
+   * gap clamp, so a merely slow frame never trips it.
+   */
+  private static readonly STALE_GAP_MS = 2000;
+  /**
+   * Set when a new snapshot may have changed entity *membership*; cleared once
+   * {@link renderScene} has reconciled objects against it. Between arrivals
+   * the interpolation frames skip the reconcile diff entirely — membership
+   * can't change mid-window, and the diff allocates (see reconcileEntities).
+   */
+  private membershipDirty = true;
 
   // Viewport reporting (see {@link reportViewport}).
   private static readonly VIEWPORT_MARGIN = 0.25;
@@ -268,25 +284,29 @@ export class WorldCanvas implements OnDestroy {
   /**
    * Adopt a freshly arrived snapshot: the previous one's bees become the lerp
    * origins, the arrival gap feeds the smoothed interpolation window, and the
-   * animation loop is (re)armed. A snapshot whose tick went *backwards* is a
-   * discontinuity — a reshuffle or a reconnect — so interpolation is skipped
-   * for that frame rather than sweeping unrelated colonies into each other.
+   * animation loop is (re)armed. Two kinds of discontinuity skip interpolation
+   * for the frame rather than sweeping unrelated worlds into each other: a
+   * tick that went *backwards* (reshuffle, reconnect to a reset sim) and a
+   * previous frame that is simply too *old* ({@link STALE_GAP_MS} — reconnect
+   * after an outage, a tab hidden long enough for the stream to lapse).
    */
   private onSnapshot(snapshot: WorldSnapshot): void {
     const now = performance.now();
     const prev = this.currSnapshot;
+    const gap = now - this.currArrivedAt;
     this.prevBees.clear();
-    if (prev && snapshot.tick >= prev.tick) {
+    if (prev && snapshot.tick >= prev.tick && gap <= WorldCanvas.STALE_GAP_MS) {
       // Clamp the gap: an off-cadence publish (a click landing mid-interval)
-      // or a stalled tab shouldn't whipsaw the window.
-      const gap = Math.min(1000, Math.max(1, now - this.currArrivedAt));
-      this.snapshotIntervalMs = 0.7 * this.snapshotIntervalMs + 0.3 * gap;
+      // shouldn't whipsaw the window.
+      const clamped = Math.min(1000, Math.max(1, gap));
+      this.snapshotIntervalMs = 0.7 * this.snapshotIntervalMs + 0.3 * clamped;
       for (const bee of prev.bees) {
         this.prevBees.set(bee.id, bee);
       }
     }
     this.currSnapshot = snapshot;
     this.currArrivedAt = now;
+    this.membershipDirty = true;
     this.renderScene(0);
     this.startInterpolation();
   }
@@ -426,18 +446,34 @@ export class WorldCanvas implements OnDestroy {
     // Every snapshot, not just on a bounds change: wax accrues tick by tick.
     this.updateHiveScale(snapshot.waxGrams);
 
-    this.reconcileEntities(
-      this.beeObjects,
-      snapshot.bees,
-      (bee) => this.createBee(this.beeMaterialFor(bee), bee.beeClass),
-      (object, bee) => this.updateBee(object as THREE.Group, bee, alpha),
-    );
-    this.reconcileEntities(
-      this.flowerObjects,
-      snapshot.resources,
-      () => new THREE.Mesh(this.flowerGeometry, this.flowerMaterial),
-      (object, flower) => this.placeAt(object, flower.position),
-    );
+    // The membership diff (create/remove + its Set allocation) runs only when
+    // a snapshot could actually have changed membership — once per arrival,
+    // not on every interpolation frame. In-between frames touch nothing but
+    // the positions of already-reconciled objects, keeping the ~60 Hz loop
+    // allocation-free per the class convention.
+    if (this.membershipDirty) {
+      this.reconcileEntities(
+        this.beeObjects,
+        snapshot.bees,
+        (bee) => this.createBee(this.beeMaterialFor(bee), bee.beeClass),
+        (object, bee) => this.updateBee(object as THREE.Group, bee, alpha),
+      );
+      this.reconcileEntities(
+        this.flowerObjects,
+        snapshot.resources,
+        () => new THREE.Mesh(this.flowerGeometry, this.flowerMaterial),
+        (object, flower) => this.placeAt(object, flower.position),
+      );
+      this.membershipDirty = false;
+    } else {
+      // Flowers are static within a snapshot, so only bees need refreshing.
+      for (const bee of snapshot.bees) {
+        const object = this.beeObjects.get(bee.id);
+        if (object) {
+          this.updateBee(object as THREE.Group, bee, alpha);
+        }
+      }
+    }
 
     // Lock the camera/highlight onto the followed bee at its fresh position.
     this.updateFollow();

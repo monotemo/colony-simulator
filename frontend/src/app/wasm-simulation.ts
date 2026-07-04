@@ -69,8 +69,14 @@ export class WasmSimulationService extends SimulationService {
   private engine?: WasmEngine;
   /** Decodes the engine's binary wire packets into parsed snapshots. */
   private readonly decoder = new SnapshotDecoder();
-  /** Steps taken since the last publish (see {@link PUBLISH_EVERY_TICKS}). */
-  private stepsSincePublish = 0;
+  /**
+   * Absolute steps taken since load/reshuffle — the cadence anchor. Publishing
+   * is gated on `stepCount % PUBLISH_EVERY_TICKS`, deliberately matching the
+   * server's stateless `tick % N` gate (see `sim.rs`): an interactive publish
+   * in between does not shift when the next periodic one lands, so the two
+   * transports keep identical cadence behavior.
+   */
+  private stepCount = 0;
   private timer?: ReturnType<typeof setInterval>;
   private disposed = false;
   /** Tick-rate multiplier set via {@link setSpeed} (0.5×, 1×, 2×). */
@@ -94,6 +100,8 @@ export class WasmSimulationService extends SimulationService {
     // Reshuffle: a fresh entropy seed, so reset grows a new colony rather than
     // replaying the previous one (the engine is no longer deterministic).
     this.engine?.reset(randomSeed());
+    // The engine's tick restarts at 0; re-anchor the cadence to match.
+    this.stepCount = 0;
     this.publish();
   }
 
@@ -149,7 +157,7 @@ export class WasmSimulationService extends SimulationService {
           return;
         }
         this.engine.step(dt);
-        if (++this.stepsSincePublish >= PUBLISH_EVERY_TICKS) {
+        if (++this.stepCount % PUBLISH_EVERY_TICKS === 0) {
           this.publish();
         }
       },
@@ -161,7 +169,6 @@ export class WasmSimulationService extends SimulationService {
     if (!this.engine) {
       return;
     }
-    this.stepsSincePublish = 0;
     // The engine includes the roster in the packet whenever it changed, so a
     // packet always decodes to a full snapshot here.
     const snapshot = this.decoder.decode(this.engine.tick_frame());

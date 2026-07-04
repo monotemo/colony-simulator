@@ -120,6 +120,21 @@ struct Viewport {
     max_y: f64,
 }
 
+impl Viewport {
+    /// A usable rect: finite edges, properly ordered. Degenerate reports (NaN,
+    /// `min > max`) must be rejected at receipt — a stored one would cull every
+    /// bee on every tick, silently starving the client of motion with nothing
+    /// to self-correct it, which is worse than keeping the previous delivery.
+    fn is_valid(self) -> bool {
+        self.min_x.is_finite()
+            && self.min_y.is_finite()
+            && self.max_x.is_finite()
+            && self.max_y.is_finite()
+            && self.min_x <= self.max_x
+            && self.min_y <= self.max_y
+    }
+}
+
 /// Messages a client may send on the WebSocket. Externally tagged like the
 /// control commands, so a viewport update is `{"viewport": {...}}` — new
 /// per-connection message kinds slot in as further variants.
@@ -160,10 +175,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        // A malformed message is dropped rather than fatal: the
-                        // client keeps its previous (or dense) delivery.
+                        // A malformed or degenerate message is dropped rather
+                        // than fatal: the client keeps its previous (or dense)
+                        // delivery.
                         if let Ok(ClientMessage::Viewport(vp)) = serde_json::from_str(&text) {
-                            viewport = Some(vp);
+                            if vp.is_valid() {
+                                viewport = Some(vp);
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -202,6 +220,19 @@ async fn send_frame(
 /// every bee is visible — the shared dense bytes are cheaper then (no index
 /// overhead, no re-encode).
 fn cull_motion(frame: &sim::WireFrame, viewport: Viewport) -> Option<Vec<u8>> {
+    // Cheap pre-check: a viewport covering the whole world (the common
+    // zoomed-out case — bees are confined to bounds) can't cull anything, so
+    // skip the per-bee filter entirely rather than building an index list
+    // just to discard it below.
+    let bounds = frame.snapshot.bounds;
+    if viewport.min_x <= 0.0
+        && viewport.min_y <= 0.0
+        && viewport.max_x >= bounds.width
+        && viewport.max_y >= bounds.height
+    {
+        return None;
+    }
+
     let bees = &frame.snapshot.bees;
     let indices: Vec<u32> = bees
         .iter()
@@ -221,4 +252,65 @@ fn cull_motion(frame: &sim::WireFrame, viewport: Viewport) -> Option<Vec<u8>> {
         frame.roster_version,
         &indices,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use colony_core::{Engine, WireEncoder};
+
+    use super::*;
+
+    fn frame() -> sim::WireFrame {
+        let engine = Engine::seeded();
+        let snapshot = Arc::new(engine.snapshot());
+        let frames = WireEncoder::new().encode(&snapshot);
+        sim::WireFrame {
+            roster_version: frames.roster_version,
+            roster: frames.roster,
+            motion: frames.motion.into(),
+            snapshot,
+        }
+    }
+
+    #[test]
+    fn degenerate_viewports_are_rejected() {
+        let valid = Viewport { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 };
+        assert!(valid.is_valid());
+        // Inverted on either axis, or any non-finite edge, must be refused —
+        // storing one would cull every bee forever (see `Viewport::is_valid`).
+        assert!(!Viewport { min_x: 10.0, max_x: 0.0, ..valid }.is_valid());
+        assert!(!Viewport { min_y: 10.0, max_y: 0.0, ..valid }.is_valid());
+        assert!(!Viewport { min_x: f64::NAN, ..valid }.is_valid());
+        assert!(!Viewport { max_y: f64::INFINITY, ..valid }.is_valid());
+    }
+
+    #[test]
+    fn world_covering_viewport_falls_back_to_dense_without_filtering() {
+        let frame = frame();
+        let bounds = frame.snapshot.bounds;
+        let whole_world = Viewport {
+            min_x: -1.0,
+            min_y: -1.0,
+            max_x: bounds.width + 1.0,
+            max_y: bounds.height + 1.0,
+        };
+        assert!(cull_motion(&frame, whole_world).is_none());
+    }
+
+    #[test]
+    fn partial_viewport_produces_a_sparse_frame() {
+        let frame = frame();
+        let bounds = frame.snapshot.bounds;
+        // A quarter of the world: some bees must be culled on the seeded layout.
+        let quarter = Viewport {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: bounds.width / 2.0,
+            max_y: bounds.height / 2.0,
+        };
+        let sparse = cull_motion(&frame, quarter).expect("some bees off-screen");
+        assert_eq!(sparse[0], colony_core::wire::SPARSE_MOTION_MESSAGE);
+    }
 }
