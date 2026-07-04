@@ -46,10 +46,11 @@ frontend/                Angular 20 app (standalone components, signals)
   implementation at build time via `environment.useWasm`: WebSocket in dev, WASM
   in production. When you add a capability, add it to the abstract class and
   implement it in **both** services. A transport may legitimately no-op a
-  capability it can't express (the abstract `setSpeed` defaults to a no-op for
-  that reason), though every capability is honoured by both today — the wasm
-  engine calls straight through while the server forwards a control command to
-  its tick loop.
+  capability that buys it nothing (the abstract `setSpeed` and `setViewport`
+  default to no-ops for that reason): the wasm service no-ops `setViewport`
+  because the engine is local — there is no wire to save — while every other
+  capability is honoured by both, the wasm engine calling straight through and
+  the server forwarding a control command to its tick loop.
 - **Interactivity is world perturbation over the control channel.** The user can
   reshuffle (reset → a *new* entropy-seeded colony, not a replay), drop a bee, or
   drop a nectar source by clicking the world. The canvas carries a pointer
@@ -69,16 +70,29 @@ frontend/                Angular 20 app (standalone components, signals)
   On the wire, immutable identity (ids, castes, resources, bounds) rides a rare
   versioned *roster* message; per-tick dynamics ride a compact f32 *motion*
   message keyed by roster index, so don't add an immutable field to motion or a
-  per-tick field to roster. The server encodes each tick **once** and fans the
-  shared bytes out to every socket; snapshot JSON survives only as a debug view.
+  per-tick field to roster. The motion header also carries the engine-computed
+  colony aggregates (`ColonyStats`): the rail reads **only** `snapshot.stats`,
+  because `snapshot.bees` may be a *sparse* subset — a client reports the world
+  rect its camera can see (`setViewport` → a `{"viewport": ...}` WS text
+  message) and the server culls its motion to it (message type 3), so
+  per-client bandwidth is O(on-screen), not O(colony). The server encodes each
+  dense tick **once** and fans the shared bytes out; only viewport-limited
+  connections pay a per-client sparse encode. Snapshot JSON survives only as a
+  debug view.
   Fields the engine doesn't emit yet are typed as optional/forward-looking on
   the TS side so the UI lights up automatically once the backend reports them —
   don't fake values for them in the UI.
-- **Rendering is snapshot-driven, not loop-driven.** `world-canvas` redraws only
-  when a new snapshot arrives, on zoom, or on resize — there is no
-  `requestAnimationFrame` loop. Meshes are reconciled by stable entity `id`;
-  geometry/materials are shared singletons created once and disposed in
-  `ngOnDestroy`. Keep it that way (don't allocate per frame).
+- **Rendering interpolates a ~10 Hz snapshot stream.** Both transports step the
+  engine at 30 Hz but publish every third tick; `world-canvas` treats each new
+  snapshot as a target and glides bees from the previous one's positions with a
+  **bounded** `requestAnimationFrame` loop — it runs outside the Angular zone
+  and stops the moment it catches up (alpha 1), so a paused or disconnected sim
+  costs no frames. A tick that goes backwards (reshuffle/reconnect) skips
+  interpolation instead of sweeping two unrelated colonies together. Meshes are
+  reconciled by stable entity `id`; geometry/materials are shared singletons
+  created once and disposed in `ngOnDestroy`; the lerp writes into a reused
+  scratch vector. Keep all of that (don't allocate per frame, don't let the
+  loop free-run).
 - **`running` is service-owned.** Both transports start already running, so the
   UI binds to `sim.running()` for Start/Pause state rather than tracking its own
   guess. `reset` does not change running.

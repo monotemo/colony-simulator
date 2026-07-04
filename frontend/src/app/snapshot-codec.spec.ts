@@ -12,7 +12,10 @@ import { WorldSnapshot } from './models';
 const ROSTER_HEX =
   '01010000000000484400001644000048430200000001000000000000000007000000010900000000000020440000f04300000000';
 const MOTION_HEX =
-  '020100000000000000000045400000803e0000c03f020000000000000000c03f00002040000000000000c8420000494200000000000000bf0000804000000000000040400000c0bf000000000000403f0000003f00000000000040410401';
+  '020100000000000000000045400000803e0000c03f0000203f0000404100000000010000000000000000000000010000000000000000000000020000000000000000c03f00002040000000000000c8420000494200000000000000bf0000804000000000000040400000c0bf000000000000403f0000003f00000000000040410401';
+/** The same tick culled to just the worker (roster index 1) — a sparse frame. */
+const SPARSE_MOTION_HEX =
+  '030100000000000000000045400000803e0000c03f0000203f000040410000000001000000000000000000000001000000000000000000000001000000000000010000000000c8420000494200000000000040400000c0bf000000000000003f0000404101';
 
 /** The snapshot those bytes encode (see `fixture_snapshot()` in `wire.rs`). */
 const FIXTURE_SNAPSHOT: WorldSnapshot = {
@@ -41,6 +44,21 @@ const FIXTURE_SNAPSHOT: WorldSnapshot = {
     },
   ],
   resources: [{ id: 9, position: { x: 640, y: 480, z: 0 }, kind: 'nectar' }],
+  stats: {
+    population: 2,
+    casteCounts: { queen: 1, worker: 1, drone: 0 },
+    stateCounts: {
+      wandering: 0,
+      foraging: 1,
+      resting: 0,
+      building_comb: 0,
+      laying_eggs: 1,
+      loafing: 0,
+      flying: 0,
+    },
+    avgEnergy: 0.625,
+    waxScalesTotal: 12,
+  },
   honeyStored: 0.25,
   waxGrams: 1.5,
 };
@@ -92,6 +110,30 @@ describe('SnapshotDecoder', () => {
     const copy = new ArrayBuffer(buf.byteLength);
     new Uint8Array(copy).set(buf);
     expect(decoder.decode(copy)).toEqual(FIXTURE_SNAPSHOT);
+  });
+
+  it('decodes a sparse frame: visible subset, whole-colony stats', () => {
+    const decoder = new SnapshotDecoder();
+    decoder.decode(bytes(ROSTER_HEX));
+    const snapshot = decoder.decode(bytes(SPARSE_MOTION_HEX))!;
+    expect(snapshot).not.toBeNull();
+    // Only the worker (roster index 1) is on screen…
+    expect(snapshot.bees).toEqual([FIXTURE_SNAPSHOT.bees[1]]);
+    // …but the aggregates, resources, and totals still describe the colony.
+    expect(snapshot.stats).toEqual(FIXTURE_SNAPSHOT.stats);
+    expect(snapshot.resources).toEqual(FIXTURE_SNAPSHOT.resources);
+    expect(snapshot.tick).toBe(FIXTURE_SNAPSHOT.tick);
+    expect(snapshot.honeyStored).toBe(FIXTURE_SNAPSHOT.honeyStored);
+  });
+
+  it('drops a sparse frame whose roster index is out of range', () => {
+    const decoder = new SnapshotDecoder();
+    decoder.decode(bytes(ROSTER_HEX));
+    const corrupt = bytes(SPARSE_MOTION_HEX);
+    corrupt[64] = 9; // the lone roster index (u32 LE at offset 64) — roster has 2 bees
+    expect(decoder.decode(corrupt)).toBeNull();
+    // Warn-and-drop, not a thrown decode: the next good frame still lands.
+    expect(decoder.decode(bytes(SPARSE_MOTION_HEX))).not.toBeNull();
   });
 
   it('drops a motion frame with no roster to join against', () => {

@@ -55,6 +55,42 @@ export interface BeeSnapshot {
   waxScales: number;
 }
 
+/** How many bees of each caste are alive, mirroring the Rust `CasteCounts`. */
+export interface CasteCounts {
+  queen: number;
+  worker: number;
+  drone: number;
+}
+
+/**
+ * Colony-wide aggregates, mirroring the Rust `ColonyStats`. Computed engine-
+ * side once per snapshot so the stats rail never needs the full bee list —
+ * which matters because `WorldSnapshot.bees` may be culled to the viewport
+ * the client reported (see `setViewport`). Always describes the whole colony.
+ */
+export interface ColonyStats {
+  /** Total bees alive, regardless of any viewport culling of `bees`. */
+  population: number;
+  casteCounts: CasteCounts;
+  stateCounts: Record<BeeState, number>;
+  /** Mean energy fraction across every bee, in `[0, 1]` (`0` when empty). */
+  avgEnergy: number;
+  /** Sum of every bee's secreted wax scales. */
+  waxScalesTotal: number;
+}
+
+/**
+ * A world-space rectangle of what a client's camera can see. Sent to the
+ * server (snake_case keys on the wire, mirroring `colony_server`'s `Viewport`)
+ * so it can cull per-tick motion to the visible bees.
+ */
+export interface ViewportRect {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
 export type ResourceKind = 'nectar';
 
 export interface ResourceSnapshot {
@@ -67,8 +103,15 @@ export interface ResourceSnapshot {
 export interface WorldSnapshot {
   tick: number;
   bounds: Bounds;
+  /**
+   * The bees this client can see. Usually the whole colony, but a client that
+   * reported a viewport receives only the bees inside it — derive colony-wide
+   * readouts from {@link stats}, never by aggregating this list.
+   */
   bees: BeeSnapshot[];
   resources: ResourceSnapshot[];
+  /** Colony-wide aggregates, valid even when `bees` is a culled subset. */
+  stats: ColonyStats;
   /** Honey in store as a fraction in `[0, 1]`; the engine reports it each tick. */
   honeyStored: number;
   /** Total comb wax the colony has produced, in grams (1000 secreted scales = 1 gram). */

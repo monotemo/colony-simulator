@@ -84,7 +84,12 @@ export class App {
   readonly tickRate = computed(() => this.baseTickRate * this.speed());
 
   readonly tick = computed(() => this.snapshot()?.tick ?? 0);
-  readonly population = computed(() => this.snapshot()?.bees.length ?? 0);
+
+  // Every colony-wide readout below derives from `snapshot().stats` — the
+  // engine-computed aggregates — never by tallying `snapshot().bees`. That
+  // list may be culled to the reported viewport, so it only ever answers
+  // "what is on screen", not "what does the colony look like".
+  readonly population = computed(() => this.snapshot()?.stats.population ?? 0);
 
   /**
    * Live per-state counts, with bar widths scaled to the busiest state. Only
@@ -93,34 +98,27 @@ export class App {
    * bees appear without ever showing empty rows.
    */
   readonly behavior = computed<BehaviorRow[]>(() => {
-    const bees = this.snapshot()?.bees ?? [];
-    const counts = new Map<BeeState, number>();
-    for (const bee of bees) {
-      counts.set(bee.state, (counts.get(bee.state) ?? 0) + 1);
+    const counts = this.snapshot()?.stats.stateCounts;
+    if (!counts) {
+      return [];
     }
-    const max = Math.max(1, ...counts.values());
-    return STATE_LABELS.filter((row) => (counts.get(row.state) ?? 0) > 0).map(
-      (row) => ({
-        ...row,
-        count: counts.get(row.state) ?? 0,
-        fraction: (counts.get(row.state) ?? 0) / max,
-      }),
-    );
+    const max = Math.max(1, ...Object.values(counts));
+    return STATE_LABELS.filter((row) => counts[row.state] > 0).map((row) => ({
+      ...row,
+      count: counts[row.state],
+      fraction: counts[row.state] / max,
+    }));
   });
 
   /** Live caste breakdown: how many queens, workers, and drones are alive. */
   readonly castes = computed<CasteRow[]>(() => {
-    const bees = this.snapshot()?.bees ?? [];
-    const counts = new Map<BeeClass, number>();
-    for (const bee of bees) {
-      counts.set(bee.beeClass, (counts.get(bee.beeClass) ?? 0) + 1);
-    }
+    const counts = this.snapshot()?.stats.casteCounts;
     const rows: { caste: BeeClass; label: string }[] = [
       { caste: 'queen', label: 'Queen' },
       { caste: 'worker', label: 'Worker' },
       { caste: 'drone', label: 'Drone' },
     ];
-    return rows.map((row) => ({ ...row, count: counts.get(row.caste) ?? 0 }));
+    return rows.map((row) => ({ ...row, count: counts?.[row.caste] ?? 0 }));
   });
 
   /** Number of queens in the colony, for the population chip. */
@@ -129,42 +127,26 @@ export class App {
   );
 
   /** Total wax scales secreted across the colony (workers only). */
-  readonly waxScales = computed(() => {
-    const bees = this.snapshot()?.bees ?? [];
-    return bees.reduce((sum, bee) => sum + (bee.waxScales ?? 0), 0);
-  });
+  readonly waxScales = computed(() => this.snapshot()?.stats.waxScalesTotal ?? 0);
 
   /** Comb wax the colony has produced, in grams (1000 scales = 1 gram). */
   readonly waxGrams = computed(() => this.snapshot()?.waxGrams ?? 0);
 
-  /**
-   * Average colony energy as a whole percentage. The engine does not model
-   * per-bee energy yet, so when no bee reports it we show full (100%).
-   */
+  /** Average colony energy as a whole percentage (0% for an empty colony). */
   readonly colonyEnergy = computed(() => {
-    const bees = this.snapshot()?.bees ?? [];
-    if (bees.length === 0) {
+    const stats = this.snapshot()?.stats;
+    if (!stats || stats.population === 0) {
       return 0;
     }
-    const withEnergy = bees.filter((bee) => bee.energy != null);
-    if (withEnergy.length === 0) {
-      return 100;
-    }
-    const avg =
-      withEnergy.reduce((sum, bee) => sum + (bee.energy ?? 0), 0) /
-      withEnergy.length;
-    return Math.round(avg * 100);
+    return Math.round(stats.avgEnergy * 100);
   });
 
   readonly nectarCount = computed(
-    () =>
-      this.snapshot()?.resources.filter((r) => r.kind === 'nectar').length ?? 0,
+    () => this.snapshot()?.resources.filter((r) => r.kind === 'nectar').length ?? 0,
   );
 
   /** Honey in store as a whole percentage (0% until the engine models it). */
-  readonly honeyStored = computed(() =>
-    Math.round((this.snapshot()?.honeyStored ?? 0) * 100),
-  );
+  readonly honeyStored = computed(() => Math.round((this.snapshot()?.honeyStored ?? 0) * 100));
 
   readonly zoomPercent = computed(() => this.world()?.zoomPercent() ?? 100);
 

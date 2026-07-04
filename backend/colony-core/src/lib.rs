@@ -19,6 +19,6 @@ pub use bee::{Bee, BeeClass, BeeState, Sex};
 pub use engine::Engine;
 pub use entity::EntityId;
 pub use math::Vec3;
-pub use snapshot::{BeeSnapshot, ResourceSnapshot, WorldSnapshot};
+pub use snapshot::{BeeSnapshot, CasteCounts, ColonyStats, ResourceSnapshot, StateCounts, WorldSnapshot};
 pub use wire::{TickFrames, WireEncoder};
 pub use world::{Bounds, Resource, ResourceKind, World};

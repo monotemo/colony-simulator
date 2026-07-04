@@ -7,6 +7,14 @@ import { SnapshotDecoder } from './snapshot-codec';
 const TICK_HZ = 30;
 
 /**
+ * Publish every Nth step, matching the server's cadence: the engine still
+ * steps at {@link TICK_HZ} for stable physics, but the canvas interpolates
+ * between snapshots, so a 10 Hz publish reads just as smooth for a third of
+ * the decode and render work. Interactive perturbations publish immediately.
+ */
+const PUBLISH_EVERY_TICKS = 3;
+
+/**
  * A fresh 32-bit entropy seed for the engine. The wasm `WasmEngine` takes a
  * `u32`, so each page load and each reshuffle seeds a different colony while the
  * engine stays reproducible for any fixed seed (see `colony_wasm`).
@@ -61,6 +69,14 @@ export class WasmSimulationService extends SimulationService {
   private engine?: WasmEngine;
   /** Decodes the engine's binary wire packets into parsed snapshots. */
   private readonly decoder = new SnapshotDecoder();
+  /**
+   * Absolute steps taken since load/reshuffle — the cadence anchor. Publishing
+   * is gated on `stepCount % PUBLISH_EVERY_TICKS`, deliberately matching the
+   * server's stateless `tick % N` gate (see `sim.rs`): an interactive publish
+   * in between does not shift when the next periodic one lands, so the two
+   * transports keep identical cadence behavior.
+   */
+  private stepCount = 0;
   private timer?: ReturnType<typeof setInterval>;
   private disposed = false;
   /** Tick-rate multiplier set via {@link setSpeed} (0.5×, 1×, 2×). */
@@ -84,6 +100,8 @@ export class WasmSimulationService extends SimulationService {
     // Reshuffle: a fresh entropy seed, so reset grows a new colony rather than
     // replaying the previous one (the engine is no longer deterministic).
     this.engine?.reset(randomSeed());
+    // The engine's tick restarts at 0; re-anchor the cadence to match.
+    this.stepCount = 0;
     this.publish();
   }
 
@@ -139,7 +157,9 @@ export class WasmSimulationService extends SimulationService {
           return;
         }
         this.engine.step(dt);
-        this.publish();
+        if (++this.stepCount % PUBLISH_EVERY_TICKS === 0) {
+          this.publish();
+        }
       },
       1000 / TICK_HZ / this.speed,
     );

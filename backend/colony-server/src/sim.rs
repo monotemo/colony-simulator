@@ -19,12 +19,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use colony_core::{Engine, WireEncoder};
+use colony_core::{Engine, WireEncoder, WorldSnapshot};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
 /// Simulation ticks per second.
 const TICK_HZ: f64 = 30.0;
+
+/// Publish every Nth tick: the physics steps at [`TICK_HZ`] for stability, but
+/// clients don't need every tick — they interpolate between frames (see
+/// `world-canvas.ts`), so a 10 Hz stream reads just as smooth at a third of
+/// the bandwidth and decode work. Interactive perturbations and reset still
+/// publish immediately, off-cadence, so clicks never feel delayed.
+const PUBLISH_EVERY_TICKS: u64 = 3;
 
 /// Draw a fresh entropy seed for a new or reshuffled colony. The engine itself
 /// stays pure (no clock, no RNG of its own); entropy enters only here, at the
@@ -82,8 +89,11 @@ pub struct WireFrame {
     pub roster_version: u32,
     /// The complete current roster message (membership: bounds, castes, resources).
     pub roster: Arc<[u8]>,
-    /// This tick's motion message (positions, velocities, energy, states).
+    /// This tick's dense motion message (positions, velocities, energy, states).
     pub motion: Arc<[u8]>,
+    /// The snapshot the frame was encoded from, so a connection with a reported
+    /// viewport can cull and encode its own sparse motion (see `handle_socket`).
+    pub snapshot: Arc<WorldSnapshot>,
 }
 
 /// Handles for talking to a running simulation task.
@@ -102,11 +112,13 @@ fn publish(engine: &Engine, encoder: &mut WireEncoder, tx: &watch::Sender<WireFr
 
 /// Encode one tick into the shared [`WireFrame`].
 fn encode_frame(engine: &Engine, encoder: &mut WireEncoder) -> WireFrame {
-    let frames = encoder.encode(&engine.snapshot());
+    let snapshot = Arc::new(engine.snapshot());
+    let frames = encoder.encode(&snapshot);
     WireFrame {
         roster_version: frames.roster_version,
         roster: frames.roster,
         motion: frames.motion.into(),
+        snapshot,
     }
 }
 
@@ -166,7 +178,9 @@ pub fn spawn() -> SimHandle {
 
             if running {
                 engine.step(dt);
-                publish(&engine, &mut encoder, &snap_tx);
+                if engine.tick() % PUBLISH_EVERY_TICKS == 0 {
+                    publish(&engine, &mut encoder, &snap_tx);
+                }
             }
         }
     });
