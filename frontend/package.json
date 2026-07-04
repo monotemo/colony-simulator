@@ -7,6 +7,7 @@
     "build": "ng build",
     "build:wasm": "wasm-pack build ../backend/colony-wasm --target web --release --out-dir \"$(pwd)/public/wasm\"",
     "build:static": "npm run build:wasm && ng build",
+    "deploy": "npm run build:static && wrangler deploy",
     "watch": "ng build --watch --configuration development",
     "test": "ng test"
   },
@@ -49,6 +50,7 @@
     "karma-coverage": "~2.2.0",
     "karma-jasmine": "~5.1.0",
     "karma-jasmine-html-reporter": "~2.1.0",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "wrangler": "4.107.0"
   }
 }

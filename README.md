@@ -82,33 +82,35 @@ The server serves the built bundle from `COLONY_STATIC_DIR`
 (default `../frontend/dist/colony-simulator/browser`) and the whole app is
 available at `http://localhost:8080`.
 
-## Deployment (Fly.io)
+## Deployment (Cloudflare Workers)
 
-The whole app — backend **and** frontend — deploys to a single Fly.io app
-(`colony-simulator-api`). The `Dockerfile` builds the `colony-server` binary,
-compiles the `colony-wasm` engine with `wasm-pack`, builds the Angular bundle
-that consumes it, and ships them together: the server serves the bundle as
-static files (via `COLONY_STATIC_DIR`) at the origin root, alongside `/ws` and
-`/api`. The deployed simulation runs **in the browser via WebAssembly**
-(`useWasm: true`), so each visitor gets their own world; the server's live
-WebSocket transport is still there for anyone who flips `useWasm` back off.
+The deployed simulation runs **in the browser via WebAssembly**
+(`useWasm: true`), so the production app is entirely static: `wasm-pack`
+compiles the `colony-wasm` engine, the Angular build bakes it into the bundle,
+and an assets-only [Cloudflare Worker](https://developers.cloudflare.com/workers/static-assets/)
+(`frontend/wrangler.jsonc`) serves the result. Static asset requests are free
+and unmetered on every Cloudflare plan, which is all this PWA needs — each
+visitor gets their own world, and no server runs behind the deployed origin.
 
-The `.github/workflows/fly-deploy.yml` workflow runs `flyctl deploy
---remote-only` on pushes to `main` that touch the backend, frontend, or deploy
-config (and via manual dispatch). It needs a `FLY_API_TOKEN` repository secret.
+The `.github/workflows/cloudflare-deploy.yml` workflow builds the wasm engine
+and the Angular bundle, then runs `wrangler deploy`, on pushes to `main` that
+touch the backend or frontend (and via manual dispatch). It needs
+`CLOUDFLARE_API_TOKEN` (a token from the *Edit Cloudflare Workers* template)
+and `CLOUDFLARE_ACCOUNT_ID` repository secrets.
 
-To build and run the same image locally:
-
-```bash
-fly deploy --remote-only          # or: docker build -t colony . && docker run -p 8080:8080 colony
-```
-
-Or build the production bundle without Docker (requires `wasm-pack` and the
-`wasm32-unknown-unknown` target) and let the server serve it — see
-**Production (single origin)** above:
+To deploy by hand (requires `wasm-pack`, the `wasm32-unknown-unknown` target,
+and a `wrangler login`):
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cd frontend
-npm run build:static    # builds the wasm package, then the Angular app at the origin root
+npm run deploy          # build:static (wasm-pack + ng build), then wrangler deploy
+```
+
+The server-backed variant — a live WebSocket stream from `colony-server`, one
+shared world — is no longer what's deployed, but the `Dockerfile` still builds
+a self-contained image of it for anyone who wants to host one:
+
+```bash
+docker build -t colony . && docker run -p 8080:8080 colony
 ```

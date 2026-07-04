@@ -2,8 +2,8 @@ name: CI
 
 # Validate the migration-critical paths on a real runner before anything merges:
 # the Angular build + unit tests on Node 24, and the Rust core tests + the
-# WebAssembly build. The Pages workflow only *builds* on push to main/beta, so
-# this is where tests actually run.
+# WebAssembly build. The Cloudflare deploy workflow only *builds* on push to
+# main, so this is where tests actually run.
 on:
   pull_request:
   push:
@@ -78,8 +78,8 @@ jobs:
         working-directory: backend
         run: cargo test -p colony-core
 
-      # Prove the engine still compiles to wasm — the path the production Pages
-      # build depends on and the one hardest to validate elsewhere.
+      # Prove the engine still compiles to wasm — the path the production
+      # deploy depends on and the one hardest to validate elsewhere.
       - name: WebAssembly build
         working-directory: backend
         run: wasm-pack build colony-wasm --target web --release

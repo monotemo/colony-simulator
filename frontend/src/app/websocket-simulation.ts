@@ -8,8 +8,8 @@ import { environment } from '../environments/environment';
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 /**
  * Ceiling on the reconnect backoff. Long enough not to hammer a downed backend,
- * short enough that recovery (including a Fly scale-to-zero cold start) is
- * picked up promptly once the server is back.
+ * short enough that recovery (including a scale-to-zero cold start on a
+ * self-hosted server) is picked up promptly once the server is back.
  */
 const MAX_RECONNECT_DELAY_MS = 15000;
 
@@ -23,9 +23,10 @@ const MAX_RECONNECT_DELAY_MS = 15000;
  *
  * URLs come from `environment.backendUrl`: when empty (dev) they resolve to the
  * page origin, so the same build works behind the Angular dev-server proxy and
- * when served as static files by the Rust server; when set (production on
- * GitHub Pages) they point at the colony-server deployed on Fly.io, which the
- * server allows via its permissive CORS layer.
+ * when served as static files by the Rust server; when set they point at a
+ * colony-server hosted elsewhere (the deployed Cloudflare origin is static-only,
+ * so a live-stream build must name its server), which the server allows via
+ * its permissive CORS layer.
  */
 @Injectable({ providedIn: 'root' })
 export class WebSocketSimulationService extends SimulationService {
