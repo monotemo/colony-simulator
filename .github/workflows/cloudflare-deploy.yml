@@ -1,0 +1,68 @@
+name: Deploy to Cloudflare
+
+# Deploy the colony-simulator to Cloudflare Workers as a static, assets-only
+# Worker (see frontend/wrangler.jsonc). The deployed simulation runs in the
+# browser via WebAssembly, so the whole app is the compiled bundle: build the
+# wasm engine with wasm-pack, build the Angular app that consumes it, and let
+# wrangler upload the result. Runs on pushes to main that touch the engine,
+# the frontend, or this workflow, and can always be triggered by hand.
+# Requires CLOUDFLARE_API_TOKEN (Edit Cloudflare Workers template) and
+# CLOUDFLARE_ACCOUNT_ID repository secrets.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/cloudflare-deploy.yml'
+  workflow_dispatch:
+
+# Never run two deploys at once; let an in-flight deploy finish rather than
+# cancelling it midway.
+concurrency:
+  group: cloudflare-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy colony-simulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (with wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        # Official installer script (fetches a prebuilt binary). The former
+        # jetli/wasm-pack-action stalled on the deprecated Node16 runtime.
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # build:static = wasm-pack (engine → public/wasm) + ng build.
+      - name: Build
+        working-directory: frontend
+        run: npm run build:static
+
+      # wrangler is a devDependency, so npx resolves the pinned local copy.
+      - name: Deploy
+        working-directory: frontend
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

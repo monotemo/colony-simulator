@@ -1,0 +1,19 @@
+// Cloudflare Workers config for the deployed colony-simulator.
+//
+// The production app is fully static — the engine runs in-browser via
+// WebAssembly (environment.production.useWasm = true) — so this is an
+// *assets-only* Worker: no server code, and static asset requests are free
+// and unmetered on every Cloudflare plan. `npm run deploy` (or the
+// cloudflare-deploy.yml workflow) builds the bundle and uploads it.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "colony-simulator",
+  "compatibility_date": "2026-07-04",
+  "assets": {
+    "directory": "./dist/colony-simulator/browser",
+    // Single-page Angular PWA: unknown paths fall back to index.html so deep
+    // links and the service worker's navigation requests resolve; real files
+    // (hashed bundles, ngsw.json, the wasm package) are served as-is.
+    "not_found_handling": "single-page-application"
+  }
+}

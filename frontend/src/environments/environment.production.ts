@@ -1,15 +1,16 @@
 /**
- * Production environment (Fly.io).
+ * Production environment (Cloudflare Workers, static assets only).
  *
- * The colony-server on Fly serves this bundle as static files and the
- * simulation runs **in the browser via WebAssembly** — each visitor gets their
- * own per-visitor world (reshuffle / spawn / nectar are local). The pure
- * `colony-core` engine is wrapped by `colony-wasm` and compiled with
- * `wasm-pack` at build time.
+ * The deployed origin serves nothing but this bundle and the simulation runs
+ * **in the browser via WebAssembly** — each visitor gets their own per-visitor
+ * world (reshuffle / spawn / nectar are local). The pure `colony-core` engine
+ * is wrapped by `colony-wasm` and compiled with `wasm-pack` at build time.
  *
- * `backendUrl` is empty because the server is the same origin: flip `useWasm`
- * to `false` to fall back to the live WebSocket transport (one shared
- * server-side world) without changing the URL.
+ * There is no server behind the deployed origin, so flipping `useWasm` to
+ * `false` (the live WebSocket transport, one shared server-side world) also
+ * means pointing `backendUrl` at a colony-server you host — empty means
+ * "same origin", which only works where colony-server itself serves the
+ * bundle (local dev, or the self-hosted Docker image).
  */
 export const environment = {
   useWasm: true,

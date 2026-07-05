@@ -1,12 +1,15 @@
-# Build and run the full colony-simulator on Fly.io: the Axum backend plus the
-# Angular frontend it serves as static files.
+# Build and run the full, self-hosted colony-simulator: the Axum backend plus
+# the Angular frontend it serves as static files.
 #
-# The image carries one process — the Rust `colony-server` — which answers
-# /ws + /api and, when COLONY_STATIC_DIR points at a real directory, falls back
-# to serving the compiled Angular bundle (see main.rs). The frontend runs the
-# simulation in-browser via WebAssembly (environment.production.useWasm = true),
-# so the server's own tick loop is unused by visitors; it's still available for
-# anyone pointing the WebSocket transport at /ws.
+# The *deployed* app is the static bundle on Cloudflare Workers (see
+# frontend/wrangler.jsonc); this image is the server-backed alternative for
+# anyone who wants the live WebSocket transport. It carries one process — the
+# Rust `colony-server` — which answers /ws + /api and, when COLONY_STATIC_DIR
+# points at a real directory, falls back to serving the compiled Angular bundle
+# (see main.rs). The frontend runs the simulation in-browser via WebAssembly
+# (environment.production.useWasm = true), so the server's own tick loop is
+# unused by visitors; it's still available for anyone pointing the WebSocket
+# transport at /ws.
 #
 # Three stages: build the server binary and the wasm engine with Cargo, build
 # the Angular app with Node (consuming that wasm), then assemble a slim runtime.
@@ -63,6 +66,6 @@ ENV COLONY_STATIC_DIR=/srv/frontend
 
 USER colony
 
-# Matches the address main.rs binds (0.0.0.0:8080) and fly.toml's internal_port.
+# Matches the address main.rs binds (0.0.0.0:8080).
 EXPOSE 8080
 CMD ["colony-server"]
