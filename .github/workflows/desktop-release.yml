@@ -1,0 +1,89 @@
+name: Desktop Release
+
+# Build native installers for the Tauri desktop shell (frontend/src-tauri) and
+# attach them to a draft GitHub release. The desktop app wraps the same static
+# wasm bundle Cloudflare serves — tauri-action runs `beforeBuildCommand`
+# (npm run build:desktop = wasm-pack + ng build --configuration desktop), then
+# `tauri build`, then uploads the bundles. Runs on version-tag pushes and can
+# be triggered by hand for a dry run (workflow_dispatch builds but publishes
+# no release). macOS artifacts are unsigned/unnotarized — no signing secrets
+# are configured — so Gatekeeper warns on first launch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # One platform failing shouldn't scrap the other installers.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # Apple Silicon
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-latest # Intel
+            args: '--target x86_64-apple-darwin'
+          - platform: ubuntu-22.04 # oldest supported LTS = widest glibc compat
+            args: ''
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tauri v2 needs webkit2gtk 4.1 (not 4.0) on Linux.
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libayatana-appindicator3-dev
+
+      - name: Install Rust (with wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # beforeBuildCommand runs wasm-pack on every platform; the macOS
+          # runners additionally cross-build both native architectures.
+          targets: wasm32-unknown-unknown${{ startsWith(matrix.platform, 'macos') && ',aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The npm-distributed prebuilt binary works on all three OSes (ci.yml's
+      # installer script is Unix-only, so it can't cover the Windows runner).
+      - name: Install wasm-pack
+        run: npm install -g wasm-pack
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      # Runs beforeBuildCommand (build:desktop), `tauri build`, and attaches
+      # the installers to a draft release for the pushed tag. On a manual
+      # workflow_dispatch run the tag inputs are empty, so tauri-action only
+      # builds — a dry run with no release.
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('Colony Simulator {0}', github.ref_name) || '' }}
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

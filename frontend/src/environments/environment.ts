@@ -14,4 +14,10 @@ export const environment = {
    * server proxies `/ws` and `/api` to the local server (see proxy.conf.json).
    */
   backendUrl: '',
+  /**
+   * When false, skip registering the PWA service worker even in optimized
+   * builds. Off only in the desktop (Tauri) build, where the worker buys
+   * nothing and isn't emitted; moot in dev, where `isDevMode()` already gates.
+   */
+  enableServiceWorker: true,
 };

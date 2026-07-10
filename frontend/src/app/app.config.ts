@@ -16,8 +16,10 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideZoneChangeDetection({ eventCoalescing: true }),
+    // The desktop (Tauri) build disables the worker: its `desktop` configuration
+    // never emits ngsw-worker.js, so registering would just 404.
     provideServiceWorker('ngsw-worker.js', {
-      enabled: !isDevMode(),
+      enabled: environment.enableServiceWorker && !isDevMode(),
       registrationStrategy: 'registerWhenStable:30000',
     }),
     // Pick the simulation transport at build time: WASM in production

@@ -15,4 +15,5 @@
 export const environment = {
   useWasm: true,
   backendUrl: '',
+  enableServiceWorker: true,
 };

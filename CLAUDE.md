@@ -37,10 +37,27 @@ frontend/                Angular 20 app (standalone components, signals)
     websocket-simulation.ts / wasm-simulation.ts  The two implementations.
     app.*                The "Hearth" dashboard (header, world, stats rail).
     world-canvas.ts      three.js renderer for the world.
+  src-tauri/             Tauri v2 desktop shell — a standalone Cargo package
+                         (NOT part of the backend workspace) that wraps the
+                         static wasm bundle in a native webview. Pure
+                         packaging: no Tauri APIs are exposed to the app.
 ```
 
 ## Architecture notes
 
+- **The desktop build is the wasm build in a Tauri shell.** The `desktop`
+  Angular configuration equals `production` except it swaps in
+  `environment.desktop.ts` and drops the `serviceWorker` option — a service
+  worker buys nothing inside an installed app and registers unreliably under
+  Tauri's protocol, so `enableServiceWorker: false` gates the
+  `provideServiceWorker` call too (the worker file is never emitted; registering
+  would 404). `tauri dev` rides `ng serve`, i.e. the WebSocket transport with a
+  local colony-server, same as browser dev; the wasm path ships via
+  `tauri build`. The shell crate (`frontend/src-tauri`) must stay out of the
+  `backend/` workspace so tauri/wry/tao never weigh down colony-core's builds;
+  its `Cargo.lock` and generated `icons/` are committed, `target/` and `gen/`
+  are ignored. Installers come from `.github/workflows/desktop-release.yml`
+  on `v*` tags.
 - **One engine, two transports.** Components depend only on the abstract
   `SimulationService` (snapshot / connected / running signals; start / pause /
   reset / setSpeed / spawnBee / addNectar). `app.config.ts` picks the
@@ -144,6 +161,11 @@ npm run build                    # production (wasm) build → dist/colony-simul
 npm test                         # Karma + Jasmine unit tests
 npm run build:static             # wasm-pack + ng build (the bundle wrangler deploys)
 npm run deploy                   # build:static, then wrangler deploy to Cloudflare
+
+# Desktop (Tauri v2; needs the platform webview deps — on Linux libwebkit2gtk-4.1-dev)
+npm run build:desktop            # wasm-pack + ng build --configuration desktop (no service worker)
+npm run tauri:dev                # native dev shell over ng serve (start colony-server first)
+npm run tauri:build              # build:desktop, then native installers → src-tauri/target/release/bundle/
 ```
 
 ## Conventions
