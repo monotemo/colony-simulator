@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Colony Simulator app icon — design master.
+
+    A golden rounded-square tile with a honeycomb cell (3D inset hexagon)
+    pressed into it and a rough ink-sketched bee flying across at an angle.
+    All shipped icons (frontend/public/icons, favicon.ico, src-tauri/icons)
+    are rendered from this file; see the icon history in git for the
+    headless-Chromium rasterization recipe. The tile rect below is swapped to
+    a full-bleed square (x=0 w=1024 rx=0) for the maskable PWA renders.
+  -->
+  <defs>
+    <linearGradient id="tileGold" x1="0" y1="0" x2="0.75" y2="1">
+      <stop offset="0" stop-color="#ffd867"/>
+      <stop offset="0.45" stop-color="#f2ab2d"/>
+      <stop offset="1" stop-color="#cd7d06"/>
+    </linearGradient>
+    <radialGradient id="tileSheen" cx="0.30" cy="0.16" r="0.95">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cellHoney" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6f4102"/>
+      <stop offset="0.55" stop-color="#8f5803"/>
+      <stop offset="1" stop-color="#b06c05"/>
+    </linearGradient>
+    <clipPath id="hexClip">
+      <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"/>
+    </clipPath>
+    <clipPath id="beeBody">
+      <path d="M332 520 C340 448 420 402 505 408 C590 402 662 452 668 522 C674 594 596 648 502 650 C414 654 336 596 332 520 Z"/>
+    </clipPath>
+    <filter id="blur3"><feGaussianBlur stdDeviation="3"/></filter>
+    <filter id="blur10"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="blur16"><feGaussianBlur stdDeviation="16"/></filter>
+    <filter id="blur34"><feGaussianBlur stdDeviation="34"/></filter>
+  </defs>
+
+  <!-- Tile (this line and the sheen below are rewritten for the full-bleed variant) -->
+  <rect x="32" y="32" width="960" height="960" rx="212" ry="212" fill="url(#tileGold)"/>
+  <rect x="32" y="32" width="960" height="960" rx="212" ry="212" fill="url(#tileSheen)"/>
+
+  <!-- Honeycomb cell: outer bevel (light lip below the hole, crease above) -->
+  <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+        transform="translate(0,9)" fill="none" stroke="#ffe294" stroke-width="14"
+        stroke-linejoin="round" opacity="0.8" filter="url(#blur3)"/>
+  <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+        transform="translate(0,-7)" fill="none" stroke="#8a5200" stroke-width="12"
+        stroke-linejoin="round" opacity="0.55" filter="url(#blur3)"/>
+
+  <!-- Cell interior -->
+  <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+        fill="url(#cellHoney)" stroke="url(#cellHoney)" stroke-width="24"
+        stroke-linejoin="round"/>
+
+  <!-- Inset shading: dark falls from the top edges, light catches the bottom -->
+  <g clip-path="url(#hexClip)">
+    <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+          fill="none" stroke="#3f2400" stroke-width="110" opacity="0.28" filter="url(#blur34)"/>
+    <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+          transform="translate(0,22)" fill="none" stroke="#452700" stroke-width="62"
+          opacity="0.72" filter="url(#blur16)"/>
+    <path d="M512 182 L797.8 347 L797.8 677 L512 842 L226.2 677 L226.2 347 Z"
+          transform="translate(0,-16)" fill="none" stroke="#ffd061" stroke-width="34"
+          opacity="0.5" filter="url(#blur10)"/>
+  </g>
+
+  <!-- Rough-sketch bee, tilted across the cell -->
+  <g transform="rotate(-20 512 512)" stroke="#3a250b" fill="none"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- dotted flight trail out of the cell's lower-left -->
+    <path d="M180 812 C250 838 306 760 268 706 C300 680 322 610 328 556"
+          stroke-width="11" stroke-dasharray="1 30" opacity="0.6" stroke="#6b4308"/>
+
+    <!-- wings: loose loops swept to the upper-left, double-inked -->
+    <path d="M480 440 C420 372 320 330 282 366 C250 400 330 462 470 462 Z"
+          fill="#ffffff" fill-opacity="0.22" stroke-width="12" opacity="0.75"/>
+    <path d="M472 448 C424 392 340 350 300 374" stroke-width="6" opacity="0.4"/>
+    <path d="M520 428 C470 330 380 262 330 296 C282 330 352 420 508 446 Z"
+          fill="#ffffff" fill-opacity="0.38" stroke-width="13"/>
+    <path d="M510 420 C466 340 392 282 344 302" stroke-width="6" opacity="0.45"/>
+
+    <!-- body: cream oval, doubled outline for the hand-drawn feel -->
+    <path d="M332 520 C340 448 420 402 505 408 C590 402 662 452 668 522 C674 594 596 648 502 650 C414 654 336 596 332 520 Z"
+          fill="#f6e3b5" fill-opacity="0.94" stroke-width="15"/>
+    <path d="M338 508 C350 448 428 392 510 412 C598 404 658 460 662 532 C666 592 590 660 504 644"
+          stroke-width="8" opacity="0.55"/>
+    <path d="M350 570 C338 542 336 520 344 490" stroke-width="7" opacity="0.4"/>
+
+    <!-- stripes, clipped to the body -->
+    <g clip-path="url(#beeBody)" stroke-width="30" opacity="0.88">
+      <path d="M430 404 C420 460 418 560 434 652"/>
+      <path d="M512 396 C505 470 505 570 514 660"/>
+      <path d="M588 412 C585 470 585 560 594 642"/>
+    </g>
+
+    <!-- head, eye, antennae -->
+    <circle cx="700" cy="500" r="56" fill="#3a250b" stroke="none"/>
+    <circle cx="716" cy="486" r="9" fill="#ffe9b8" stroke="none"/>
+    <path d="M726 452 C748 420 752 392 738 362" stroke-width="12"/>
+    <path d="M700 444 C706 408 694 380 668 356" stroke-width="12"/>
+
+    <!-- stinger and legs -->
+    <path d="M334 528 C316 532 300 540 286 552" stroke-width="14"/>
+    <path d="M430 648 C424 676 412 694 396 706" stroke-width="13"/>
+    <path d="M500 656 C498 686 490 706 476 720" stroke-width="13"/>
+    <path d="M570 646 C572 676 566 696 554 712" stroke-width="13"/>
+  </g>
+</svg>
