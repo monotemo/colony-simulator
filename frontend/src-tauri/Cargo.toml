@@ -1,0 +1,20 @@
+# Desktop shell for the colony simulator. This crate is *pure packaging*: it
+# opens a webview over the same static wasm bundle Cloudflare serves (built by
+# `npm run build:desktop`), so the engine still runs as WebAssembly inside the
+# page and no Tauri APIs are exposed to it.
+[package]
+name = "colony-simulator-desktop"
+version = "0.1.0"
+description = "Colony Simulator desktop shell (Tauri)"
+edition = "2021"
+license = "Apache-2.0"
+
+# Standalone on purpose: Tauri's host-only deps (wry/tao/webkit) must not join
+# the backend workspace, which stays lean for colony-core/server/wasm.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

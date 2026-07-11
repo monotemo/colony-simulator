@@ -114,3 +114,29 @@ a self-contained image of it for anyone who wants to host one:
 ```bash
 docker build -t colony . && docker run -p 8080:8080 colony
 ```
+
+## Desktop app (Tauri)
+
+The same static wasm bundle also ships as a native desktop app via a
+[Tauri v2](https://v2.tauri.app) shell (`frontend/src-tauri`). The shell is
+pure packaging — the engine still runs as WebAssembly inside the webview, no
+Tauri APIs are exposed — built with the `desktop` Angular configuration, which
+is production minus the service worker (pointless inside an installed app,
+and unreliable under Tauri's custom protocol).
+
+Prerequisites: Rust, `wasm-pack`, the `wasm32-unknown-unknown` target, and
+[Tauri's platform dependencies](https://v2.tauri.app/start/prerequisites/)
+(on Linux: `libwebkit2gtk-4.1-dev` and friends).
+
+```bash
+cd frontend
+npm run tauri:dev       # dev shell over ng serve — WebSocket transport, so run
+                        # `cargo run -p colony-server` first, like browser dev
+npm run tauri:build     # wasm-pack + ng build --configuration desktop, then
+                        # native installers → frontend/src-tauri/target/release/bundle/
+```
+
+Pushing a `v*` tag runs `.github/workflows/desktop-release.yml`, which builds
+installers for Windows, macOS (Apple Silicon + Intel), and Linux and attaches
+them to a draft GitHub release. The macOS artifacts are unsigned/unnotarized,
+so Gatekeeper warns on first launch.

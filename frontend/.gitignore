@@ -9,6 +9,10 @@
 # Generated wasm-pack output (built from backend/colony-wasm)
 /public/wasm
 
+# Tauri desktop shell build output (Cargo.lock and icons/ stay committed)
+/src-tauri/target
+/src-tauri/gen
+
 # Node
 /node_modules
 npm-debug.log
